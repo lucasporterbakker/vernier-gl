@@ -38,6 +38,8 @@ const DEFAULTS = {
 
 const hex01 = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
 
+const RELEASE_S = 0.48; // duration of the release sweep across the measured area
+
 export function createVernier(options = {}) {
   const opts = { ...DEFAULTS, ...options, colors: { ...DEFAULTS.colors, ...(options.colors || {}) } };
   const canvas = opts.canvas;
@@ -68,7 +70,7 @@ export function createVernier(options = {}) {
   gl.useProgram(prog);
 
   const U = {};
-  for (const n of ['uRes', 'uCross', 'uRaw', 'uMeas', 'uMeasA', 'uMinor', 'uMajor', 'uDpr', 'uEnergy', 'uPulse', 'uBg', 'uLine', 'uAc'])
+  for (const n of ['uRes', 'uCross', 'uRaw', 'uMeas', 'uMeasA', 'uRel', 'uMinor', 'uMajor', 'uDpr', 'uEnergy', 'uPulse', 'uBg', 'uLine', 'uAc'])
     U[n] = gl.getUniformLocation(prog, n);
 
   /* ---------- state ---------- */
@@ -80,7 +82,7 @@ export function createVernier(options = {}) {
   const raw = { x: -1e4, y: -1e4 };     // css px, canvas-local
   const target = { x: -1e4, y: -1e4 };  // snapped
   const cur = { x: -1e4, y: -1e4 };     // lerped
-  const meas = { on: false, ax: 0, ay: 0, hx: 0, hy: 0, alpha: 0 };
+  const meas = { on: false, ax: 0, ay: 0, hx: 0, hy: 0, alpha: 0, rel: 0 };
 
   function setColors(c = {}) {
     if (destroyed || lost) return;
@@ -124,6 +126,8 @@ export function createVernier(options = {}) {
       meas.alpha = 1;
     } else if (meas.alpha > 0) {
       meas.alpha = reduced ? 0 : Math.max(0, meas.alpha - opts.fade * dt);
+      if (meas.rel > 0) meas.rel = Math.min(1, meas.rel + dt / RELEASE_S);
+      if (meas.alpha <= 0) meas.rel = 0;
     }
 
     const pulse = reduced ? 0.85 : 0.7 + 0.3 * Math.sin(t / 1000 * 2.6);
@@ -131,6 +135,7 @@ export function createVernier(options = {}) {
     gl.uniform2f(U.uRaw, raw.x * dpr, (H - raw.y) * dpr);
     gl.uniform4f(U.uMeas, meas.ax * dpr, (H - meas.ay) * dpr, meas.hx * dpr, (H - meas.hy) * dpr);
     gl.uniform1f(U.uMeasA, meas.alpha);
+    gl.uniform1f(U.uRel, meas.rel);
     gl.uniform1f(U.uEnergy, energy);
     gl.uniform1f(U.uPulse, pulse);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -143,6 +148,7 @@ export function createVernier(options = {}) {
       w: Math.abs(Math.round(target.x - meas.ax)),
       h: Math.abs(Math.round(target.y - meas.ay)),
       measureAlpha: meas.alpha,
+      release: meas.rel,
     });
 
     const settled = Math.abs(cur.x - target.x) < 0.05 && Math.abs(cur.y - target.y) < 0.05;
@@ -185,18 +191,20 @@ export function createVernier(options = {}) {
     const p = local(e);
     if (!meas.on) {
       meas.on = true;
+      meas.rel = 0;
       meas.ax = Math.round(p.x / opts.grid) * opts.grid;
       meas.ay = Math.round(p.y / opts.grid) * opts.grid;
       meas.hx = meas.ax; meas.hy = meas.ay;
     } else {
-      meas.on = false; // release — the rectangle fades from here
+      meas.on = false; // release — the sweep runs, then the rectangle fades
+      meas.rel = reduced ? 0 : 1e-4;
     }
     kick();
   };
 
   const onKey = e => {
     if (e.key === 'Escape' && (meas.on || meas.alpha > 0)) {
-      meas.on = false; meas.alpha = 0; kick();
+      meas.on = false; meas.alpha = 0; meas.rel = 0; kick();
     }
   };
 

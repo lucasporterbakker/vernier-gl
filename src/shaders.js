@@ -25,6 +25,7 @@ uniform vec2  uCross;    // snapped crosshair, device px, y-up
 uniform vec2  uRaw;      // raw pointer, device px, y-up
 uniform vec4  uMeas;     // measurement corners: anchor.xy, head.xy (device px, y-up)
 uniform float uMeasA;    // measurement alpha: 1 while measuring, fades after release
+uniform float uRel;      // release-sweep progress: 0 idle/measuring, 0→1 after release
 uniform float uMinor;    // minor grid spacing, device px (integer for crispness)
 uniform float uMajor;    // major grid spacing, device px
 uniform float uDpr;      // device pixel ratio
@@ -84,13 +85,22 @@ void main() {
   float mFill = inX * inY * 0.045 * uMeasA;
   float mAnchor = handle(p, uMeas.xy, r) * uMeasA;
 
+  // release sweep: an accent band scans the captured area once, top-left to
+  // bottom-right, as the rectangle lets go — measured, recorded
+  vec2 span = max(hi - lo, vec2(1.0));
+  float sw = ((p.x - lo.x) + (hi.y - p.y)) / (span.x + span.y);
+  float bd = (sw - mix(-0.2, 1.2, uRel)) / 0.075;
+  float band = exp(-bd * bd) * step(1e-4, uRel) * smoothstep(0.0, 0.1, uMeasA);
+  float mSweep = inX * inY * band;
+
   vec3 col = uBg;
   col += uLine * (minor + major) * (1.0 - inner * uEnergy);
   col += uLine * cross * (1.0 - inner);
   col += uAc * dots;
   col += uLine * lift * 0.012;
   col += uAc * mFill;
-  col += uAc * mBorder * 0.55;
+  col += uAc * mSweep * 0.18;
+  col += uAc * mBorder * (0.55 + band * 0.45);
   col += uAc * mAnchor * 0.9;
   col += uAc * ring * uEnergy * uPulse;
 

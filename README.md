@@ -5,7 +5,8 @@
 An infinite 8px grid that reveals itself around your pointer. A crosshair
 that glides between grid intersections like the jaw of a measuring
 instrument. Click once to pin an anchor, move to stretch a live dimension
-rectangle (`w × h`), click again to release it. Named after the [vernier
+rectangle (`w × h`), click again to release — a scan-line sweeps the
+captured area once as it lets go. Named after the [vernier
 scale](https://en.wikipedia.org/wiki/Vernier_scale) — the sliding secondary
 scale that made calipers precise.
 
@@ -54,9 +55,10 @@ Returns `null` when WebGL2 is unavailable — keep your CSS fallback.
 | `colors`     | tokyo-night-ish        | `{ bg, line, accent }`, hex strings                 |
 | `onUpdate`   | `null`                 | called once per rendered frame with the state below |
 
-`onUpdate` receives `{ x, y, cx, cy, energy, measuring, w, h, measureAlpha }`
-— `x/y` are the snapped coordinates, `cx/cy` the eased crosshair position
-(use it to place a readout), `w/h` the current measurement in CSS px.
+`onUpdate` receives `{ x, y, cx, cy, energy, measuring, w, h, measureAlpha,
+release }` — `x/y` are the snapped coordinates, `cx/cy` the eased crosshair
+position (use it to place a readout), `w/h` the current measurement in CSS
+px, and `release` the 0→1 progress of the post-release sweep.
 
 ## Three.js
 
@@ -101,8 +103,8 @@ textures, one fullscreen triangle.
   stops completely: zero `requestAnimationFrame` at rest, measured.
 - **Tab hidden** → rendering pauses; **context lost** → the canvas bows out
   and your page background shows.
-- **`prefers-reduced-motion`** → no easing, no pulse, no fades; snapping
-  and measuring still work, instantly.
+- **`prefers-reduced-motion`** → no easing, no pulse, no fades, no release
+  sweep; snapping and measuring still work, instantly.
 - Pointer listeners are passive; clicks on links, buttons, and form
   controls over the backdrop never start measurements (add
   `data-vernier-ignore` to opt out any element).

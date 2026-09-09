@@ -46,6 +46,7 @@ export function createVernierMaterial(THREE, { colors = {} } = {}) {
       uRaw:    { value: new THREE.Vector2(-1e4, -1e4) },
       uMeas:   { value: new THREE.Vector4(0, 0, 0, 0) },
       uMeasA:  { value: 0 },
+      uRel:    { value: 0 },
       uMinor:  { value: 16 },
       uMajor:  { value: 128 },
       uDpr:    { value: 2 },
