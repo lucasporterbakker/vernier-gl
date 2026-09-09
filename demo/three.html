@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vernier × three.js</title>
+<!--
+  vernier's Three.js adapter, in the smallest possible harness: a renderer,
+  the backdrop helper, and a render loop. Three is loaded from a CDN here —
+  in your project it's a normal import; the library itself never imports it.
+-->
+<style>
+  * { margin: 0; }
+  html, body { height: 100%; overflow: hidden; background: #0e0f15; }
+  canvas { display: block; }
+  #hint {
+    position: fixed; left: 20px; bottom: 18px; pointer-events: none;
+    font: 500 10px/1 ui-monospace, monospace; letter-spacing: 0.08em; color: #7b84a5;
+  }
+</style>
+<script type="importmap">
+  { "imports": { "three": "https://unpkg.com/three@0.170.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="hint">vernier × three.js &nbsp;·&nbsp; move the mouse</div>
+<script type="module">
+import * as THREE from 'three';
+import { createVernierBackdrop } from '../three/VernierMaterial.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const backdrop = createVernierBackdrop(THREE, renderer);
+
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  backdrop.resize();
+});
+
+// Plain loop for demo simplicity. In an app that already renders every
+// frame, call backdrop.update() before renderer.render() and you're done.
+renderer.setAnimationLoop(t => {
+  backdrop.update(t);
+  renderer.render(backdrop.scene, backdrop.camera);
+});
+</script>
+</body>
+</html>

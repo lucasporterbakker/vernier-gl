@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vernier — interactive design grid</title>
+<!--
+  vernier demo. Everything visual comes from the library (one fragment
+  shader); this page is a consumer of its API: it owns the canvas, the
+  nav, the theme picker, and renders the coordinate readout in the DOM
+  from the onUpdate callback.
+-->
+<style>
+  :root {
+    --bg0: #0e0f15;
+    --ac: #a9c1fa;
+    --fg1: #9aa5ce;
+    --fg2: #7b84a5;
+  }
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { background: var(--bg0); overflow: hidden; font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+
+  /* demo chrome — deliberately reads as UI, not shader content */
+  #bar {
+    position: fixed; top: 0; left: 0; right: 0; height: 48px; z-index: 2;
+    display: flex; align-items: center; gap: 16px; padding: 0 20px;
+    background: color-mix(in srgb, var(--bg0) 82%, transparent);
+    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+    border-bottom: 1px solid color-mix(in srgb, var(--ac) 14%, transparent);
+  }
+  #bar .brand { font-size: 13px; font-weight: 500; letter-spacing: 0.08em; color: var(--ac); }
+  #bar .spec { font-size: 11px; letter-spacing: 0.06em; color: var(--fg2); }
+  #themewrap { margin-left: auto; position: relative; }
+  #theme-btn {
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+    background: transparent; color: var(--fg1);
+    border: 1px solid color-mix(in srgb, var(--fg2) 45%, transparent); border-radius: 6px;
+    font: 500 11px/1 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: 0.06em;
+    padding: 8px 12px;
+  }
+  #theme-btn .caret { font-size: 9px; color: var(--fg2); }
+  .sw { width: 9px; height: 9px; border-radius: 2px; display: inline-block; background: var(--ac); }
+  #theme-menu {
+    position: absolute; top: calc(100% + 8px); right: 0; width: max-content;
+    display: flex; flex-direction: column; overflow: hidden;
+    background: color-mix(in srgb, var(--bg0) 94%, transparent);
+    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+    border: 1px solid color-mix(in srgb, var(--fg2) 40%, transparent); border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  }
+  #theme-menu[hidden] { display: none; }
+  #theme-menu button {
+    display: flex; align-items: center; gap: 8px; white-space: nowrap;
+    background: transparent; border: none; cursor: pointer; text-align: left;
+    color: var(--fg1); font: 500 11px/1 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: 0.06em;
+    padding: 9px 14px;
+  }
+  #theme-menu button:hover, #theme-menu button[aria-selected="true"] { background: color-mix(in srgb, var(--fg2) 16%, transparent); color: var(--ac); }
+  #theme-btn:focus-visible, #theme-menu button:focus-visible { outline: 2px solid var(--ac); outline-offset: -2px; }
+
+  /* the readout is DOM on purpose: the library reports numbers, the page
+     decides the typography */
+  #readout {
+    position: fixed; left: 0; top: 0; pointer-events: none; z-index: 1;
+    font-size: 10px; letter-spacing: 0.1em; white-space: nowrap;
+    color: var(--ac); opacity: 0;
+    transition: opacity 0.35s ease;
+  }
+  #hint {
+    position: fixed; left: 20px; bottom: 18px; pointer-events: none; z-index: 1;
+    font-size: 10px; letter-spacing: 0.08em; color: var(--fg2);
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<nav id="bar">
+  <span class="brand">vernier</span>
+  <span class="spec">interactive design grid</span>
+  <span id="themewrap">
+    <button id="theme-btn" type="button" aria-expanded="false" aria-haspopup="listbox"><i class="sw"></i><span id="theme-name">tokyo-night</span><span class="caret">▾</span></button>
+    <div id="theme-menu" role="listbox" aria-label="Theme" hidden></div>
+  </span>
+</nav>
+<div id="readout" aria-hidden="true"></div>
+<div id="hint">move the mouse &nbsp;·&nbsp; click&ndash;click to measure &nbsp;·&nbsp; grid: 8</div>
+
+<script type="module">
+import { createVernier } from '../src/vernier.js';
+
+// [bg0, accent, fg1, fg2, light] — a handful of editor palettes
+const THEMES = {
+  'tokyo-night':  ['#0e0f15', '#a9c1fa', '#9aa5ce', '#7b84a5', 0],
+  'github-dark':  ['#07090d', '#39d353', '#7d8590', '#777e87', 0],
+  'github-light': ['#e9edf1', '#1a7f37', '#59636e', '#6e757d', 1],
+  'dracula':      ['#16171e', '#bd93f9', '#a0a8cd', '#8692b7', 0],
+  'nord':         ['#0f1218', '#a8ecff', '#94a3bd', '#7f8b9f', 0],
+  'monokai':      ['#151613', '#c0f53a', '#b0aa90', '#939080', 0],
+  'solarized':    ['#00181e', '#3fd8cd', '#8fa1a3', '#7c9493', 0],
+  'gruvbox':      ['#161616', '#ffa14a', '#a89984', '#9c8e7b', 0],
+  'catppuccin':   ['#111119', '#d9c1ff', '#a6adc8', '#82879f', 0],
+  'synthwave':    ['#15131d', '#ff8de0', '#a99fc4', '#9288ac', 0]
+};
+const LINE = { dark: '#58a6ff', light: '#0969da' };
+
+const readout = document.getElementById('readout');
+const themeBtn = document.getElementById('theme-btn');
+const themeMenu = document.getElementById('theme-menu');
+const themeName = document.getElementById('theme-name');
+
+const W = () => innerWidth, H = () => innerHeight;
+
+const v = createVernier({
+  canvas: document.getElementById('c'),
+  onUpdate: s => {
+    const flipX = s.cx > W() - 150, flipY = s.cy > H() - 44;
+    readout.style.transform = `translate(${Math.round(s.cx) + (flipX ? -136 : 14)}px, ${Math.round(s.cy) + (flipY ? -28 : 16)}px)`;
+    readout.textContent = s.measuring ? `w: ${s.w} · h: ${s.h}` : `x: ${s.x} · y: ${s.y}`;
+    readout.style.opacity = s.measuring ? '1' : (s.energy > 0.03 ? String(Math.min(1, s.energy * 1.6)) : '0');
+  },
+});
+
+function applyTheme(name) {
+  const t = THEMES[name];
+  if (!t || !v) return;
+  themeName.textContent = name;
+  for (const b of themeMenu.children) {
+    if (b.dataset.theme === name) b.setAttribute('aria-selected', 'true');
+    else b.removeAttribute('aria-selected');
+  }
+  const root = document.documentElement.style;
+  root.setProperty('--bg0', t[0]);
+  root.setProperty('--ac', t[1]);
+  root.setProperty('--fg1', t[2]);
+  root.setProperty('--fg2', t[3]);
+  v.setColors({ bg: t[0], line: t[4] ? LINE.light : LINE.dark, accent: t[1] });
+  try { localStorage.setItem('vernier-theme', name); } catch (e) {}
+}
+
+for (const name of Object.keys(THEMES)) {
+  const b = document.createElement('button');
+  b.type = 'button'; b.setAttribute('role', 'option'); b.dataset.theme = name;
+  const sw = document.createElement('i');
+  sw.className = 'sw'; sw.style.background = THEMES[name][1];
+  b.append(sw, name);
+  b.addEventListener('click', () => { applyTheme(name); setMenu(false); });
+  themeMenu.appendChild(b);
+}
+const setMenu = open => { themeMenu.hidden = !open; themeBtn.setAttribute('aria-expanded', String(open)); };
+themeBtn.addEventListener('click', () => setMenu(themeMenu.hidden));
+addEventListener('pointerdown', e => { if (!themeMenu.hidden && !e.target.closest('#themewrap')) setMenu(false); });
+addEventListener('keydown', e => { if (e.key === 'Escape' && !themeMenu.hidden) { setMenu(false); themeBtn.focus(); } });
+
+let start = 'tokyo-night';
+try { const s = localStorage.getItem('vernier-theme'); if (s && THEMES[s]) start = s; } catch (e) {}
+applyTheme(start);
+</script>
+</body>
+</html>

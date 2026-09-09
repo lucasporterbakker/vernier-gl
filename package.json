@@ -1,0 +1,49 @@
+{
+  "name": "vernier-gl",
+  "version": "0.1.0",
+  "description": "Interactive design grid — a snapping, measuring WebGL backdrop. One fragment shader, zero dependencies, zero rAF at idle.",
+  "type": "module",
+  "main": "src/vernier.js",
+  "exports": {
+    ".": "./src/vernier.js",
+    "./shaders": "./src/shaders.js",
+    "./three": "./three/VernierMaterial.js"
+  },
+  "files": [
+    "src",
+    "three",
+    "demo",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lucasporterbakker/vernier-gl.git"
+  },
+  "homepage": "https://github.com/lucasporterbakker/vernier-gl#readme",
+  "bugs": "https://github.com/lucasporterbakker/vernier-gl/issues",
+  "author": "Lucas Porter-Bakker (https://lucasporterbakker.com)",
+  "license": "MIT",
+  "keywords": [
+    "webgl",
+    "webgl2",
+    "shader",
+    "glsl",
+    "grid",
+    "background",
+    "backdrop",
+    "creative-coding",
+    "generative",
+    "threejs",
+    "design-tools"
+  ],
+  "peerDependencies": {
+    "three": ">=0.152.0"
+  },
+  "peerDependenciesMeta": {
+    "three": {
+      "optional": true
+    }
+  }
+}
