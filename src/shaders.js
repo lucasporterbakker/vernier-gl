@@ -111,8 +111,8 @@ void main() {
   col += uLine * lift * 0.012;
   col += uAc * mFill;
   col += uAc * glow * (0.05 + 0.04 * uHold);
-  col += uAc * mSweep * 0.18;
-  col += uAc * mBorder * (0.55 + band * 0.45 + 0.25 * min(uHold, 1.0));
+  col += uAc * mSweep * 0.10;
+  col += uAc * mBorder * (0.55 + band * 0.22 + 0.25 * min(uHold, 1.0));
   col += uAc * mAnchor * 0.9;
   col += uAc * mCorners * 0.9;
   col += uAc * ring * uEnergy * uPulse;

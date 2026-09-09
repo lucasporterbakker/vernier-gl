@@ -3,8 +3,9 @@
 //
 // An infinite 8px grid that reveals itself around the cursor, a crosshair
 // snapped to grid intersections, and click-drag dimension measuring: the
-// captured pane reads like lit glass over the grid. Release to hold the
-// final area — a scan-line sweeps it slowly while it stands.
+// captured pane reads like lit glass over the grid, with a live w × h
+// readout. Release to hold the final area — the calculated dimensions
+// flash in the pane, and a faint scan-line passes while it stands.
 //
 // Left alone, it measures on its own (Shadertoy can't see the mouse until
 // you click, so the idle state runs a deterministic demo loop instead).
@@ -39,6 +40,51 @@ vec2 path(float t, vec2 R) {
                          0.27 * sin(t * 0.71 + 1.7) + 0.09 * cos(t * 1.13)));
 }
 
+// ---- tiny 4x5 digit font, for the w × h readout ----------------------------
+
+const int FONT[11] = int[11](
+  0x69996, 0x26227, 0x6924F, 0xE161E, 0x99F11,   // 0 1 2 3 4
+  0xF8E1E, 0x68E96, 0xF1244, 0x69696, 0x69716,   // 5 6 7 8 9
+  0x09690);                                       // ×
+
+// sample glyph g on its unit cell (org = bottom-left, cell = s*(4,5) px)
+float glyph(int g, vec2 p, vec2 org, float s) {
+  vec2 uv = (p - org) / (vec2(4.0, 5.0) * s);
+  if (min(uv.x, uv.y) < 0.0 || max(uv.x, uv.y) >= 1.0) return 0.0;
+  int col = int(uv.x * 4.0);
+  int row = int(uv.y * 5.0);              // 0 = bottom
+  int nib = (FONT[g] >> (row * 4)) & 15;  // rows packed top-first: bottom = low nibble
+  return float((nib >> (3 - col)) & 1);
+}
+
+int dig(int n) { return n < 10 ? 1 : n < 100 ? 2 : n < 1000 ? 3 : 4; }
+
+// print n right-aligned so its last glyph ends at `end` (advance = 5 units)
+float printNumR(vec2 p, vec2 end, float s, int n) {
+  float acc = 0.0;
+  vec2 cur = end;
+  for (int i = 0; i < 4; i++) {
+    cur.x -= 5.0 * s;
+    acc += glyph(n % 10, p, cur, s);
+    n /= 10;
+    if (n == 0) break;
+  }
+  return acc;
+}
+
+// "W×H" with org at the string's bottom-left
+float dims(vec2 p, vec2 org, float s, int W, int H) {
+  int dw = dig(W), dh = dig(H);
+  float t = printNumR(p, org + vec2(float(dw * 5) * s, 0.0), s, W);
+  t += glyph(10, p, org + vec2(float(dw * 5) * s, 0.0), s);
+  t += printNumR(p, org + vec2(float((dw + 1 + dh) * 5) * s, 0.0), s, H);
+  return t;
+}
+
+float dimsWidth(float s, int W, int H) { return float((dig(W) + 1 + dig(H)) * 5 - 1) * s; }
+
+// ----------------------------------------------------------------------------
+
 void mainImage(out vec4 O, in vec2 fragCoord) {
   vec2 R = iResolution.xy;
   vec2 p = fragCoord;
@@ -49,16 +95,17 @@ void mainImage(out vec4 O, in vec2 fragCoord) {
 
   vec2 raw, a, h;                            // cursor, anchor, measure head
   float measA = 0.0, hold = 0.0, rel = 0.0;
+  float liveA = 0.0, ctrA = 0.0;             // readout: live at cursor / centered flash
 
   if (interacted) {
     raw = iMouse.xy;
     a = snap(abs(iMouse.zw));
     h = snap(iMouse.xy);
     if (iMouse.z > 0.0) {
-      measA = 1.0;                           // dragging: live measurement
+      measA = 1.0; liveA = 0.9;              // dragging: live measurement
     } else {
-      measA = 0.85; hold = 1.0;              // released: the area stands
-      rel = fract(t / 3.0);                  // ...with a slow repeating scan
+      measA = 0.85; hold = 1.0; ctrA = 0.5;  // released: the area stands
+      rel = fract(t / 4.0);                  // ...with a slow passing scan
     }
   } else {
     // demo loop, every 7s: wander → measure → hold → sweep away
@@ -67,14 +114,17 @@ void mainImage(out vec4 O, in vec2 fragCoord) {
     a = snap(path(n * 7.0 + 2.0, R));
     h = snap(raw);
     if (c > 2.0 && c < 4.2) {
-      measA = 1.0;
+      measA = 1.0; liveA = 0.9;
     } else if (c >= 4.2) {
       h = snap(path(n * 7.0 + 4.2, R));      // head frozen at release
       hold = 1.0;
-      if (c < 4.85) { measA = 1.0; }
-      else {
+      if (c < 4.85) {
+        measA = 1.0;
+        ctrA = 0.35 + 0.65 * exp(-(c - 4.2) * 6.0);   // flash, then settle
+      } else {
         measA = max(0.0, 1.0 - (c - 4.85) * 1.4);
         rel = min(1.0, (c - 4.85) / 0.48);
+        ctrA = 0.35 * measA;                           // ...then away
       }
     }
   }
@@ -121,12 +171,22 @@ void mainImage(out vec4 O, in vec2 fragCoord) {
                      + handle(p, vec2(lo.x, hi.y), r) + handle(p, vec2(hi.x, lo.y), r), 1.0)
                  * hold * measA;
 
-  // release sweep: an accent band scans the captured area
+  // release sweep: a faint accent band passes over the captured area
   vec2 span = max(hi - lo, vec2(1.0));
   float sw = ((p.x - lo.x) + (hi.y - p.y)) / (span.x + span.y);
   float bd = (sw - mix(-0.2, 1.2, rel)) / 0.075;
   float band = exp(-bd * bd) * step(1e-4, rel) * smoothstep(0.0, 0.1, measA);
   float mSweep = inX * inY * band;
+
+  // the readout: live w × h beside the cursor, or the calculated area
+  // flashed in the middle of the pane on release
+  int W = int(hi.x - lo.x), H = int(hi.y - lo.y);
+  float txt = 0.0;
+  if (liveA > 0.0)
+    txt += dims(p, h + vec2(14.0, -34.0), 2.0, W, H) * liveA;
+  if (ctrA > 0.0)
+    txt += dims(p, vec2((lo.x + hi.x) * 0.5 - dimsWidth(4.0, W, H) * 0.5,
+                        (lo.y + hi.y) * 0.5 - 2.5 * 4.0), 4.0, W, H) * ctrA;
 
   float pulse = 0.7 + 0.3 * sin(t * 2.6);
 
@@ -137,11 +197,12 @@ void mainImage(out vec4 O, in vec2 fragCoord) {
   col += LINE * lift * 0.012;
   col += AC * mFill;
   col += AC * glow * (0.05 + 0.04 * hold);
-  col += AC * mSweep * 0.18;
-  col += AC * mBorder * (0.55 + band * 0.45 + 0.25 * hold);
+  col += AC * mSweep * 0.10;
+  col += AC * mBorder * (0.55 + band * 0.22 + 0.25 * hold);
   col += AC * mAnchor * 0.9;
   col += AC * mCorners * 0.9;
   col += AC * ring * pulse;
+  col += AC * min(txt, 1.0);
 
   O = vec4(col, 1.0);
 }
