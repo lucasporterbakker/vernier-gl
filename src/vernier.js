@@ -39,6 +39,7 @@ const DEFAULTS = {
 const hex01 = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
 
 const RELEASE_S = 0.48; // duration of the release sweep across the measured area
+const HOLD_S = 0.65;    // completed measurement holds fully present this long
 
 export function createVernier(options = {}) {
   const opts = { ...DEFAULTS, ...options, colors: { ...DEFAULTS.colors, ...(options.colors || {}) } };
@@ -70,7 +71,7 @@ export function createVernier(options = {}) {
   gl.useProgram(prog);
 
   const U = {};
-  for (const n of ['uRes', 'uCross', 'uRaw', 'uMeas', 'uMeasA', 'uRel', 'uMinor', 'uMajor', 'uDpr', 'uEnergy', 'uPulse', 'uBg', 'uLine', 'uAc'])
+  for (const n of ['uRes', 'uCross', 'uRaw', 'uMeas', 'uMeasA', 'uRel', 'uHold', 'uMinor', 'uMajor', 'uDpr', 'uEnergy', 'uPulse', 'uBg', 'uLine', 'uAc'])
     U[n] = gl.getUniformLocation(prog, n);
 
   /* ---------- state ---------- */
@@ -82,7 +83,7 @@ export function createVernier(options = {}) {
   const raw = { x: -1e4, y: -1e4 };     // css px, canvas-local
   const target = { x: -1e4, y: -1e4 };  // snapped
   const cur = { x: -1e4, y: -1e4 };     // lerped
-  const meas = { on: false, ax: 0, ay: 0, hx: 0, hy: 0, alpha: 0, rel: 0 };
+  const meas = { on: false, ax: 0, ay: 0, hx: 0, hy: 0, alpha: 0, rel: 0, hold: false, holdT0: 0, holdV: 0 };
 
   function setColors(c = {}) {
     if (destroyed || lost) return;
@@ -124,10 +125,18 @@ export function createVernier(options = {}) {
     if (meas.on) {
       meas.hx = cur.x; meas.hy = cur.y;
       meas.alpha = 1;
+      meas.holdV = 0;
+    } else if (meas.hold) {
+      // the final area holds for a beat — quick attack with a small
+      // overshoot (the confirmation flash), then steady
+      const th = (t - meas.holdT0) / 1000;
+      meas.alpha = 1;
+      meas.holdV = Math.min(th / 0.06, 1) * (1 + 0.35 * Math.exp(-th * 7));
+      if (th >= HOLD_S) { meas.hold = false; meas.rel = 1e-4; }
     } else if (meas.alpha > 0) {
       meas.alpha = reduced ? 0 : Math.max(0, meas.alpha - opts.fade * dt);
       if (meas.rel > 0) meas.rel = Math.min(1, meas.rel + dt / RELEASE_S);
-      if (meas.alpha <= 0) meas.rel = 0;
+      if (meas.alpha <= 0) { meas.rel = 0; meas.holdV = 0; }
     }
 
     const pulse = reduced ? 0.85 : 0.7 + 0.3 * Math.sin(t / 1000 * 2.6);
@@ -136,6 +145,7 @@ export function createVernier(options = {}) {
     gl.uniform4f(U.uMeas, meas.ax * dpr, (H - meas.ay) * dpr, meas.hx * dpr, (H - meas.hy) * dpr);
     gl.uniform1f(U.uMeasA, meas.alpha);
     gl.uniform1f(U.uRel, meas.rel);
+    gl.uniform1f(U.uHold, meas.holdV);
     gl.uniform1f(U.uEnergy, energy);
     gl.uniform1f(U.uPulse, pulse);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -145,8 +155,10 @@ export function createVernier(options = {}) {
       cx: cur.x, cy: cur.y,
       energy,
       measuring: meas.on,
-      w: Math.abs(Math.round(target.x - meas.ax)),
-      h: Math.abs(Math.round(target.y - meas.ay)),
+      holding: meas.hold,
+      hx: meas.hx, hy: meas.hy,
+      w: Math.abs(Math.round((meas.on ? target.x : meas.hx) - meas.ax)),
+      h: Math.abs(Math.round((meas.on ? target.y : meas.hy) - meas.ay)),
       measureAlpha: meas.alpha,
       release: meas.rel,
     });
@@ -191,20 +203,24 @@ export function createVernier(options = {}) {
     const p = local(e);
     if (!meas.on) {
       meas.on = true;
-      meas.rel = 0;
+      meas.rel = 0; meas.hold = false; meas.holdV = 0;
       meas.ax = Math.round(p.x / opts.grid) * opts.grid;
       meas.ay = Math.round(p.y / opts.grid) * opts.grid;
       meas.hx = meas.ax; meas.hy = meas.ay;
     } else {
-      meas.on = false; // release — the sweep runs, then the rectangle fades
-      meas.rel = reduced ? 0 : 1e-4;
+      meas.on = false; // release — hold the final area, then sweep it away
+      meas.hx = target.x; meas.hy = target.y; // commit to the snapped point, not mid-ease
+      meas.rel = 0;
+      meas.hold = !reduced;
+      meas.holdT0 = performance.now();
+      if (reduced) meas.alpha = 0;
     }
     kick();
   };
 
   const onKey = e => {
-    if (e.key === 'Escape' && (meas.on || meas.alpha > 0)) {
-      meas.on = false; meas.alpha = 0; meas.rel = 0; kick();
+    if (e.key === 'Escape' && (meas.on || meas.hold || meas.alpha > 0)) {
+      meas.on = false; meas.hold = false; meas.holdV = 0; meas.alpha = 0; meas.rel = 0; kick();
     }
   };
 

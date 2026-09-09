@@ -26,6 +26,7 @@ uniform vec2  uRaw;      // raw pointer, device px, y-up
 uniform vec4  uMeas;     // measurement corners: anchor.xy, head.xy (device px, y-up)
 uniform float uMeasA;    // measurement alpha: 1 while measuring, fades after release
 uniform float uRel;      // release-sweep progress: 0 idle/measuring, 0→1 after release
+uniform float uHold;     // completed-measurement hold: 0 otherwise, ~1 while held (may overshoot for the flash)
 uniform float uMinor;    // minor grid spacing, device px (integer for crispness)
 uniform float uMajor;    // major grid spacing, device px
 uniform float uDpr;      // device pixel ratio
@@ -58,11 +59,18 @@ void main() {
   float spot = exp(-(pr * pr) / (2.0 * sigma * sigma));
   float lift = uEnergy * spot;
 
+  // measurement rectangle geometry, early: the pane lights the grid under it
+  vec2 lo = min(uMeas.xy, uMeas.zw);
+  vec2 hi = max(uMeas.xy, uMeas.zw);
+  float inX = step(lo.x - hw, p.x) * step(p.x, hi.x + hw);
+  float inY = step(lo.y - hw, p.y) * step(p.y, hi.y + hw);
+  float glass = inX * inY * uMeasA;
+
   vec2 dMin = gridDist(p, uMinor);
   vec2 dMaj = gridDist(p, uMajor);
-  float minor = hairline(min(dMin.x, dMin.y), hw) * (0.028 + 0.105 * lift);
-  float major = hairline(min(dMaj.x, dMaj.y), hw) * (0.060 + 0.150 * lift);
-  float dots  = hairline(max(dMaj.x, dMaj.y), 1.1 * uDpr) * lift * 0.85;
+  float minor = hairline(min(dMin.x, dMin.y), hw) * (0.028 + 0.105 * lift + 0.055 * glass);
+  float major = hairline(min(dMaj.x, dMaj.y), hw) * (0.060 + 0.150 * lift + 0.075 * glass);
+  float dots  = hairline(max(dMaj.x, dMaj.y), 1.1 * uDpr) * max(lift * 0.85, glass * 0.6);
 
   // crosshair through the snapped point
   vec2 dc = abs(p - uCross);
@@ -74,16 +82,19 @@ void main() {
   float boxc = max(dc.x, dc.y);
   float inner = 1.0 - smoothstep(r - 0.9 * uDpr, r, boxc);
 
-  // measurement rectangle: border + faint fill + anchor handle
-  vec2 lo = min(uMeas.xy, uMeas.zw);
-  vec2 hi = max(uMeas.xy, uMeas.zw);
-  float inX = step(lo.x - hw, p.x) * step(p.x, hi.x + hw);
-  float inY = step(lo.y - hw, p.y) * step(p.y, hi.y + hw);
+  // pane material: hairline border, faint fill, inner edge glow — lit glass
   float ex = min(abs(p.x - lo.x), abs(p.x - hi.x));
   float ey = min(abs(p.y - lo.y), abs(p.y - hi.y));
   float mBorder = max(hairline(ex, hw) * inY, hairline(ey, hw) * inX) * uMeasA;
-  float mFill = inX * inY * 0.045 * uMeasA;
+  float edgeIn = max(min(min(p.x - lo.x, hi.x - p.x), min(p.y - lo.y, hi.y - p.y)), 0.0);
+  float glow = exp(-edgeIn / (16.0 * uDpr)) * glass;
+  float mFill = glass * (0.055 + 0.045 * uHold);
   float mAnchor = handle(p, uMeas.xy, r) * uMeasA;
+
+  // completed hold: all four corners take handles for a beat
+  float mCorners = min(handle(p, lo, r) + handle(p, hi, r)
+                     + handle(p, vec2(lo.x, hi.y), r) + handle(p, vec2(hi.x, lo.y), r), 1.0)
+                 * min(uHold, 1.0) * uMeasA;
 
   // release sweep: an accent band scans the captured area once, top-left to
   // bottom-right, as the rectangle lets go — measured, recorded
@@ -99,9 +110,11 @@ void main() {
   col += uAc * dots;
   col += uLine * lift * 0.012;
   col += uAc * mFill;
+  col += uAc * glow * (0.05 + 0.04 * uHold);
   col += uAc * mSweep * 0.18;
-  col += uAc * mBorder * (0.55 + band * 0.45);
+  col += uAc * mBorder * (0.55 + band * 0.45 + 0.25 * min(uHold, 1.0));
   col += uAc * mAnchor * 0.9;
+  col += uAc * mCorners * 0.9;
   col += uAc * ring * uEnergy * uPulse;
 
   O = vec4(col, 1.0);

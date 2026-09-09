@@ -5,8 +5,9 @@
 An infinite 8px grid that reveals itself around your pointer. A crosshair
 that glides between grid intersections like the jaw of a measuring
 instrument. Click once to pin an anchor, move to stretch a live dimension
-rectangle (`w × h`), click again to release — a scan-line sweeps the
-captured area once as it lets go. Named after the [vernier
+pane (`w × h`) that reads like lit glass over the grid, click again to
+release — the final area holds for a beat, corners take handles, then a
+scan-line sweeps it away. Named after the [vernier
 scale](https://en.wikipedia.org/wiki/Vernier_scale) — the sliding secondary
 scale that made calipers precise.
 
@@ -55,10 +56,12 @@ Returns `null` when WebGL2 is unavailable — keep your CSS fallback.
 | `colors`     | tokyo-night-ish        | `{ bg, line, accent }`, hex strings                 |
 | `onUpdate`   | `null`                 | called once per rendered frame with the state below |
 
-`onUpdate` receives `{ x, y, cx, cy, energy, measuring, w, h, measureAlpha,
-release }` — `x/y` are the snapped coordinates, `cx/cy` the eased crosshair
-position (use it to place a readout), `w/h` the current measurement in CSS
-px, and `release` the 0→1 progress of the post-release sweep.
+`onUpdate` receives `{ x, y, cx, cy, hx, hy, energy, measuring, holding,
+w, h, measureAlpha, release }` — `x/y` are the snapped coordinates, `cx/cy`
+the eased crosshair position (use it to place a readout), `hx/hy` the
+measure head, `w/h` the measurement in CSS px (frozen once released),
+`holding` true while the completed area holds before dissolving, and
+`release` the 0→1 progress of the post-release sweep.
 
 ## Three.js
 

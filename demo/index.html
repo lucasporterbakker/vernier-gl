@@ -115,10 +115,14 @@ const W = () => innerWidth, H = () => innerHeight;
 const v = createVernier({
   canvas: document.getElementById('c'),
   onUpdate: s => {
-    const flipX = s.cx > W() - 150, flipY = s.cy > H() - 44;
-    readout.style.transform = `translate(${Math.round(s.cx) + (flipX ? -136 : 14)}px, ${Math.round(s.cy) + (flipY ? -28 : 16)}px)`;
-    readout.textContent = s.measuring ? `w: ${s.w} · h: ${s.h}` : `x: ${s.x} · y: ${s.y}`;
-    readout.style.opacity = s.measuring ? '1' : (s.energy > 0.03 ? String(Math.min(1, s.energy * 1.6)) : '0');
+    // while measuring or holding, the readout pins to the measure head and
+    // shows the (final) dimensions; otherwise it rides the crosshair
+    const m = s.measuring || s.holding;
+    const px = m ? s.hx : s.cx, py = m ? s.hy : s.cy;
+    const flipX = px > W() - 150, flipY = py > H() - 44;
+    readout.style.transform = `translate(${Math.round(px) + (flipX ? -136 : 14)}px, ${Math.round(py) + (flipY ? -28 : 16)}px)`;
+    readout.textContent = m ? `w: ${s.w} · h: ${s.h}` : `x: ${s.x} · y: ${s.y}`;
+    readout.style.opacity = m ? '1' : (s.energy > 0.03 ? String(Math.min(1, s.energy * 1.6)) : '0');
   },
 });
 
