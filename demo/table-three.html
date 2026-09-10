@@ -1,0 +1,867 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vernier — drafting table × three.js</title>
+<style>
+  :root {
+    --bg: #0e0f15; --fg: #e6edf3; --fg1: #9aa5ce;
+    --line: #58a6ff; --ac: #a9c1fa;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+  canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 2;
+    display: flex; align-items: baseline; gap: 14px; padding: 18px 22px;
+    pointer-events: none; user-select: none;
+  }
+  nav b { font-weight: 600; letter-spacing: 0.02em; }
+  nav span { color: var(--fg1); font-size: 11px; }
+  #hint {
+    position: fixed; left: 22px; bottom: 16px; z-index: 2;
+    color: var(--fg1); font-size: 11px; letter-spacing: 0.02em;
+    user-select: none; pointer-events: none;
+  }
+  #hint em { font-style: normal; color: var(--fg); }
+  #readout, .dim {
+    position: fixed; left: 0; top: 0; z-index: 2; pointer-events: none;
+    color: var(--ac); font-size: 11px; white-space: nowrap;
+    opacity: 0; will-change: transform;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<nav><b>vernier</b><span>drafting table &times; three.js</span></nav>
+<div id="hint"><em>click&ndash;click</em> to draft &nbsp;&middot;&nbsp; <em>scroll</em> to tilt &nbsp;&middot;&nbsp; <em>pinch</em> to zoom</div>
+<div id="readout" aria-hidden="true"></div>
+<div class="dim" id="dw" aria-hidden="true"></div>
+<div class="dim" id="dh" aria-hidden="true"></div>
+<div class="dim" id="dz" aria-hidden="true"></div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.170.0/build/three.module.js" } }
+</script>
+<script type="module">
+/* vernier — drafting table, the three.js edition.
+   Same instrument as demo/table.html, rebuilt on a real scene graph:
+   BoxGeometry volumes wearing graph-paper ShaderMaterials, a ground plane
+   carrying the vernier grid, a PerspectiveCamera whose fov morphs from
+   near-ortho (2°) to 31° while the dolly compensates — the flat plan stays
+   pixel-true — and Raycaster picking. The sun stays analytic in-shader so
+   hairlines and penumbras remain crisp. State, gestures, undo, and the
+   share-link format are identical to the zero-dependency edition. */
+
+import * as THREE from 'three';
+
+const MAXB = 16, GRID = 8;
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ---------- shared GLSL ---------- */
+
+const CHUNK = `
+const vec3 SUN = vec3(-0.4006, -0.2504, 0.8814);
+
+uniform vec2  uBLo[${MAXB}];
+uniform vec2  uBHi[${MAXB}];
+uniform float uBB[${MAXB}];
+uniform float uBH[${MAXB}];
+uniform int   uN;
+uniform vec3  uBg, uLine, uAc;
+
+float lineAA(float d, float fw) { return 1.0 - smoothstep(0.5, 1.5, d / max(fw, 1e-6)); }
+
+float gridAA(vec2 q, float s, vec2 fw, out float moire) {
+  vec2 g = abs(q / s - round(q / s)) * s;
+  vec2 a = g / max(fw, vec2(1e-6));
+  moire = smoothstep(2.5, 5.0, s / max(fw.x, fw.y));
+  return (1.0 - smoothstep(0.5, 1.5, min(a.x, a.y))) * moire;
+}
+
+float boxShadow(vec3 p, vec3 blo, vec3 bhi) {
+  float t0 = (blo.z - p.z) / SUN.z, t1 = (bhi.z - p.z) / SUN.z;
+  if (t1 <= 0.001) return 1.0;
+  t0 = max(t0, 0.0);
+  float tm = (t0 + t1) * 0.5;
+  vec2 q = p.xy + SUN.xy * tm;
+  vec2 dxy = max(blo.xy - q, q - bhi.xy);
+  float d = max(dxy.x, dxy.y);
+  float w = 3.0 + tm * 0.16;
+  return mix(0.45, 1.0, smoothstep(-0.25 * w, w, d));
+}`;
+
+const GROUND_VERT = `
+out vec3 vW;
+void main() {
+  vW = (modelMatrix * vec4(position, 1.0)).xyz;
+  gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0);
+}`;
+
+const GROUND_FRAG = `
+precision highp float;
+out vec4 O;
+in vec3 vW;
+${CHUNK}
+uniform vec2  uRaw;      // pointer on the sheet (world xy)
+uniform vec2  uCross;    // eased snap point
+uniform float uEnergy;
+uniform float uPulse;
+uniform vec4  uMeas;     // active rect lo.xy hi.xy
+uniform float uMeasA;
+uniform float uOrthoK;   // 1 = flat plan
+uniform float uHalfH;    // view half height (world units)
+uniform vec2  uPivot;    // the camera's ground focus
+
+void main() {
+  vec2 p = vW.xy;
+  vec2 fw = vec2(length(vec2(dFdx(p.x), dFdy(p.x))), length(vec2(dFdx(p.y), dFdy(p.y))));
+  float fade = exp(-max(length(p - uPivot) - uHalfH * 2.0, 0.0) * 0.0009);
+
+  float pr = distance(p, uRaw);
+  float sigma = 180.0;
+  float lift = uEnergy * exp(-(pr * pr) / (2.0 * sigma * sigma));
+
+  vec2 lo = uMeas.xy, hi = uMeas.zw;
+  float inR = step(lo.x, p.x) * step(p.x, hi.x) * step(lo.y, p.y) * step(p.y, hi.y);
+  float glass = inR * uMeasA;
+
+  float m1, m2;
+  float minor = gridAA(p, 8.0, fw, m1) * (0.028 + 0.105 * lift + 0.055 * glass);
+  float major = gridAA(p, 64.0, fw, m2) * (0.060 + 0.150 * lift + 0.075 * glass);
+
+  vec2 gm = abs(p / 64.0 - round(p / 64.0)) * 64.0;
+  vec2 am = gm / max(fw, vec2(1e-6));
+  float dots = (1.0 - smoothstep(1.0, 2.2, max(am.x, am.y))) * max(lift * 0.85, glass * 0.6) * m2;
+
+  vec2 dcw = abs(p - uCross);
+  vec2 ac = dcw / max(fw, vec2(1e-6));
+  float cross = (1.0 - smoothstep(0.5, 1.5, min(ac.x, ac.y))) * uEnergy * 0.20;
+  float boxd = max(ac.x, ac.y);
+  float ring = (1.0 - smoothstep(0.5, 1.5, abs(boxd - 7.0))) * uEnergy;
+  float inner = 1.0 - smoothstep(5.5, 7.0, boxd);
+
+  float ex = min(abs(p.x - lo.x), abs(p.x - hi.x));
+  float ey = min(abs(p.y - lo.y), abs(p.y - hi.y));
+  float inX = step(lo.x - 4.0, p.x) * step(p.x, hi.x + 4.0);
+  float inY = step(lo.y - 4.0, p.y) * step(p.y, hi.y + 4.0);
+  float mBorder = max(lineAA(ex, fw.x) * inY * step(lo.y, p.y) * step(p.y, hi.y),
+                      lineAA(ey, fw.y) * inX * step(lo.x, p.x) * step(p.x, hi.x)) * uMeasA;
+  float edgeIn = max(min(min(p.x - lo.x, hi.x - p.x), min(p.y - lo.y, hi.y - p.y)), 0.0);
+  float glow = exp(-edgeIn / 16.0) * glass;
+
+  // drafted footprints stay inked; an elevated block's ink lifts off with the tilt
+  float fpB = 0.0, fpF = 0.0;
+  for (int i = 0; i < ${MAXB}; i++) {
+    if (i >= uN) break;
+    float ink = uBB[i] < 0.5 ? 1.0 : uOrthoK;
+    if (ink < 0.01) continue;
+    vec2 l2 = uBLo[i], h2 = uBHi[i];
+    float iX = step(l2.x, p.x) * step(p.x, h2.x);
+    float iY = step(l2.y, p.y) * step(p.y, h2.y);
+    float ex2 = min(abs(p.x - l2.x), abs(p.x - h2.x));
+    float ey2 = min(abs(p.y - l2.y), abs(p.y - h2.y));
+    fpB = max(fpB, max(lineAA(ex2, fw.x) * iY, lineAA(ey2, fw.y) * iX) * ink);
+    fpF = max(fpF, iX * iY * ink);
+  }
+
+  vec3 col = uBg;
+  col += (uLine * (minor + major) * (1.0 - inner * uEnergy)) * fade;
+  col += uAc * fpF * 0.030;
+  col += uAc * fpB * 0.40 * fade;
+  col += uAc * dots * fade;
+  col += uLine * lift * 0.012;
+  col += uAc * glass * 0.055;
+  col += uAc * glow * 0.05;
+
+  float sh = 1.0, ao = 1.0;
+  for (int i = 0; i < ${MAXB}; i++) {
+    if (i >= uN) break;
+    if (uBH[i] < 0.5) continue;
+    sh = min(sh, boxShadow(vW, vec3(uBLo[i], uBB[i]), vec3(uBHi[i], uBB[i] + uBH[i])));
+    if (uBB[i] < 0.5) {
+      vec2 dc2 = max(uBLo[i] - p, p - uBHi[i]);
+      ao *= 0.80 + 0.20 * smoothstep(0.0, 16.0, max(dc2.x, dc2.y));
+    }
+  }
+  col *= mix(1.0, sh, 0.88) * ao;
+
+  col += uLine * cross * (1.0 - inner);
+  col += uAc * mBorder * 0.55;
+  col += uAc * ring * uPulse;
+
+  O = vec4(col, 1.0);
+}`;
+
+const BOX_VERT = `
+out vec3 vW;
+out vec3 vN;
+void main() {
+  vW = (modelMatrix * vec4(position, 1.0)).xyz;
+  vN = normal;   // boxes stay axis-aligned: local normals are world normals
+  gl_Position = projectionMatrix * viewMatrix * vec4(vW, 1.0);
+}`;
+
+const BOX_FRAG = `
+precision highp float;
+out vec4 O;
+in vec3 vW;
+in vec3 vN;
+${CHUNK}
+uniform vec3  uLo;       // this volume: lo.xy, base
+uniform vec3  uHi;       // hi.xy, top
+uniform float uIdx;
+uniform float uHovOn;    // 1 while this box is hovered
+uniform float uHovFace;  // face id with the hand on it (0 = none)
+uniform float uHalfH;
+uniform vec2  uPivot;
+
+void main() {
+  vec3 p = vW;
+  vec3 n = normalize(vN);
+  float fade = exp(-max(length(p.xy - uPivot) - uHalfH * 2.0, 0.0) * 0.0009);
+
+  vec2 fwXY = vec2(length(vec2(dFdx(p.x), dFdy(p.x))), length(vec2(dFdx(p.y), dFdy(p.y))));
+  float fwZ = length(vec2(dFdx(p.z), dFdy(p.z)));
+
+  vec2 q, fq; float e1, e2, f1, f2;
+  if (abs(n.z) > 0.5)      { q = p.xy; fq = fwXY; e1 = min(p.x - uLo.x, uHi.x - p.x); f1 = fwXY.x; e2 = min(p.y - uLo.y, uHi.y - p.y); f2 = fwXY.y; }
+  else if (abs(n.x) > 0.5) { q = vec2(p.y, p.z); fq = vec2(fwXY.y, fwZ); e1 = min(p.y - uLo.y, uHi.y - p.y); f1 = fwXY.y; e2 = min(p.z - uLo.z, uHi.z - p.z); f2 = fwZ; }
+  else                     { q = vec2(p.x, p.z); fq = vec2(fwXY.x, fwZ); e1 = min(p.x - uLo.x, uHi.x - p.x); f1 = fwXY.x; e2 = min(p.z - uLo.z, uHi.z - p.z); f2 = fwZ; }
+
+  float m1, m2;
+  float minor = gridAA(q, 8.0, fq, m1) * 0.050;
+  float major = gridAA(q, 64.0, fq, m2) * 0.085;
+  float edge = max(lineAA(e1, f1), lineAA(e2, f2));
+
+  float faceId = abs(n.z) > 0.5 ? 1.0 : (n.x < -0.5 ? 2.0 : (n.x > 0.5 ? 3.0 : (n.y < -0.5 ? 4.0 : 5.0)));
+  float hovFace = (uHovOn > 0.5 && abs(faceId - uHovFace) < 0.5) ? 1.0 : 0.0;
+
+  float lam = 0.35 + 0.65 * max(dot(n, SUN), 0.0);
+  float sh = 1.0;
+  for (int i = 0; i < ${MAXB}; i++) {
+    if (i >= uN) break;
+    if (float(i) == uIdx || uBH[i] < 0.5) continue;
+    sh = min(sh, boxShadow(p + n * 0.5, vec3(uBLo[i], uBB[i]), vec3(uBHi[i], uBB[i] + uBH[i])));
+  }
+
+  vec3 col = vec3(0.0);
+  vec3 fcol = uBg * 0.35 + uLine * (minor + major) * fade + uAc * abs(n.z) * 0.020;
+  col += fcol * lam * mix(1.0, sh, 0.85);
+  col += uAc * hovFace * 0.045;
+  col += uAc * edge * (0.72 + 0.28 * uHovOn) * fade;
+
+  O = vec4(col, 1.0);
+}`;
+
+/* ---------- three setup ---------- */
+
+const canvas = document.getElementById('c');
+// the shaders author their own final colors, exactly as the zero-dep edition
+// does — so keep three's sRGB conversions out of both ends of the pipe
+THREE.ColorManagement.enabled = false;
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false });
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+const scene = new THREE.Scene();
+
+const camera = new THREE.PerspectiveCamera(31.4, 1, 100, 100000);
+camera.matrixAutoUpdate = false;
+
+const HEX = h => new THREE.Color(h);
+const boxArrays = {
+  uBLo: { value: Array.from({ length: MAXB }, () => new THREE.Vector2()) },
+  uBHi: { value: Array.from({ length: MAXB }, () => new THREE.Vector2()) },
+  uBB:  { value: new Float32Array(MAXB) },
+  uBH:  { value: new Float32Array(MAXB) },
+  uN:   { value: 0 },
+};
+const palette = {
+  uBg:   { value: HEX('#0e0f15') },
+  uLine: { value: HEX('#58a6ff') },
+  uAc:   { value: HEX('#a9c1fa') },
+};
+
+const groundMat = new THREE.ShaderMaterial({
+  glslVersion: THREE.GLSL3,
+  vertexShader: GROUND_VERT,
+  fragmentShader: GROUND_FRAG,
+  uniforms: {
+    ...boxArrays, ...palette,
+    uRaw:    { value: new THREE.Vector2(-1e4, -1e4) },
+    uCross:  { value: new THREE.Vector2(-1e4, -1e4) },
+    uEnergy: { value: 0 },
+    uPulse:  { value: 0.85 },
+    uMeas:   { value: new THREE.Vector4(0, 0, 0, 0) },
+    uMeasA:  { value: 0 },
+    uOrthoK: { value: 1 },
+    uHalfH:  { value: 400 },
+    uPivot:  { value: new THREE.Vector2(0, 0) },
+  },
+});
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(60000, 60000), groundMat);
+ground.frustumCulled = false;
+scene.add(ground);
+
+const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+const boxes = [];
+for (let i = 0; i < MAXB; i++) {
+  const mat = new THREE.ShaderMaterial({
+    glslVersion: THREE.GLSL3,
+    vertexShader: BOX_VERT,
+    fragmentShader: BOX_FRAG,
+    uniforms: {
+      ...boxArrays, ...palette,
+      uLo: { value: new THREE.Vector3() },
+      uHi: { value: new THREE.Vector3() },
+      uIdx: { value: i },
+      uHovOn: { value: 0 },
+      uHovFace: { value: 0 },
+      uHalfH: { value: 400 },
+      uPivot: { value: new THREE.Vector2(0, 0) },
+    },
+  });
+  const m = new THREE.Mesh(boxGeo, mat);
+  m.visible = false;
+  m.userData.idx = i;
+  scene.add(m);
+  boxes.push(m);
+}
+
+/* ---------- state (same instrument as the zero-dep edition) ---------- */
+
+const TAN = 0.28;
+let dpr = 1, W = 0, H = 0;
+let energy = 0, lastMove = -1e9, lastT = 0, rafId = 0, running = false;
+
+const raw = { x: -1e4, y: -1e4 };
+const target = { x: -1e4, y: -1e4 };
+const cur = { x: -1e4, y: -1e4 };
+const meas = { on: false, ax: 0, ay: 0 };
+const tilt = { cur: 0, tgt: 0 };
+const zoom = { cur: 1, tgt: 1 };
+const orbit = { cur: 0, tgt: 0 };
+const rects = [];
+
+const hover = { box: -1, face: 0, mode: '', bound: '' };
+const drag = { on: false, box: -1, mode: '', bound: '', unit: [0, 0], perUnit: 1,
+               start: 0, lo0: null, hi0: null, sx: 0, sy: 0, offX: 0, offY: 0, szX: 0, szY: 0 };
+
+const readout = document.getElementById('readout');
+const dw = document.getElementById('dw'), dh = document.getElementById('dh'), dz = document.getElementById('dz');
+const hint = document.getElementById('hint');
+let hintTilted = false;
+const snap = v => Math.round(v / GRID) * GRID;
+const riseK = () => Math.min(1, tilt.cur * 3.2);
+
+function place(el, text, s, ox, oy) {
+  if (!s) { el.style.opacity = '0'; return; }
+  el.textContent = text;
+  el.style.transform = `translate(${Math.round(s[0] + ox)}px, ${Math.round(s[1] + oy)}px)`;
+  el.style.opacity = '0.95';
+}
+
+function computeBases() {
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i];
+    const area = (r.hi[0] - r.lo[0]) * (r.hi[1] - r.lo[1]);
+    let b = 0;
+    for (let j = 0; j < i; j++) {
+      const s = rects[j];
+      const ov = Math.max(0, Math.min(r.hi[0], s.hi[0]) - Math.max(r.lo[0], s.lo[0]))
+               * Math.max(0, Math.min(r.hi[1], s.hi[1]) - Math.max(r.lo[1], s.lo[1]));
+      if (ov > 0.55 * area) b = Math.max(b, s.base + s.h);
+    }
+    r.base = b;
+  }
+}
+
+function commitRect(hx, hy) {
+  const lo = [Math.min(meas.ax, hx), Math.min(meas.ay, hy)];
+  const hi = [Math.max(meas.ax, hx), Math.max(meas.ay, hy)];
+  const bw = hi[0] - lo[0], bh = hi[1] - lo[1];
+  if (bw >= GRID && bh >= GRID) {
+    checkpoint();
+    rects.push({ lo, hi, h: Math.max(24, Math.min(280, Math.min(bw, bh))), base: 0, born: performance.now() });
+    if (rects.length > MAXB) rects.shift();
+    persist();
+  }
+}
+
+/* ---------- share links, undo, persistence (same format) ---------- */
+
+const STORE_KEY = 'vernier-table';
+
+function serialize() {
+  return rects.map(r => [r.lo[0] / GRID, r.lo[1] / GRID,
+    (r.hi[0] - r.lo[0]) / GRID, (r.hi[1] - r.lo[1]) / GRID, r.h / GRID]
+    .map(Math.round).join('.')).join('_');
+}
+
+function deserialize(s) {
+  if (!s) return null;
+  const out = [];
+  for (const tok of s.split('_')) {
+    const v = tok.split('.').map(Number);
+    if (v.length !== 5 || !v.every(Number.isFinite)) return null;
+    const [x, y, w, h, z] = v;
+    if (w < 1 || h < 1) return null;
+    out.push({ lo: [x * GRID, y * GRID], hi: [(x + w) * GRID, (y + h) * GRID],
+               h: Math.max(GRID, Math.min(640, z * GRID)), base: 0, born: 0 });
+    if (out.length >= MAXB) break;
+  }
+  return out;
+}
+
+let saveT = 0;
+function persist() {
+  clearTimeout(saveT);
+  saveT = setTimeout(() => {
+    const d = serialize();
+    try { localStorage.setItem(STORE_KEY, d); } catch (e) { /* private mode */ }
+    const v = `${tilt.tgt.toFixed(2)},${orbit.tgt.toFixed(2)},${zoom.tgt.toFixed(2)}`;
+    try { history.replaceState(null, '', d ? `#d=${d}&v=${v}` : location.pathname); } catch (e) { /* sandboxed */ }
+  }, 250);
+}
+
+const hist = [];
+function checkpoint() {
+  hist.push(serialize());
+  if (hist.length > 50) hist.shift();
+}
+
+function undo() {
+  const s = hist.pop();
+  if (s === undefined) return;
+  const list = deserialize(s) || [];
+  rects.length = 0;
+  for (const r of list) rects.push(r);
+  hover.box = -1; hover.face = 0; hover.mode = ''; drag.on = false;
+  canvas.style.cursor = '';
+  persist();
+  kick();
+}
+
+/* ---------- camera: near-ortho fov morph on a real three camera ---------- */
+
+const _m = new THREE.Matrix4();
+const _x = new THREE.Vector3(), _y = new THREE.Vector3(), _z = new THREE.Vector3(), _e = new THREE.Vector3();
+let camState = null;
+
+function updateCamera() {
+  const T = tilt.cur;
+  const ease = T * T * (3 - 2 * T);
+  const el = (90 - 55 * ease) * Math.PI / 180;
+  const az = ease * (-25 * Math.PI / 180 + orbit.cur);
+  const P = [W / 2, H / 2, 0];
+  const perspK = Math.min(1, ease / 0.35);
+  const fov = 2 + (31.4 - 2) * (reduced ? (T > 0 ? 1 : 0) : perspK);
+  const tanH = Math.tan(fov * Math.PI / 360);
+  const dist = H / (2 * zoom.cur * tanH);
+
+  const eye = [
+    P[0] + dist * Math.sin(az) * Math.cos(el),
+    P[1] - dist * Math.cos(az) * Math.cos(el),
+    P[2] + dist * Math.sin(el),
+  ];
+  const norm = v => { const l = Math.hypot(...v); return v.map(x => x / l); };
+  const fwd = norm([P[0] - eye[0], P[1] - eye[1], P[2] - eye[2]]);
+  let right;
+  if (Math.abs(fwd[2]) > 0.999) right = [1, 0, 0];
+  else right = norm([fwd[1], -fwd[0], 0]);   // fwd × (0,0,1)
+  const up = [right[1] * fwd[2] - right[2] * fwd[1], right[2] * fwd[0] - right[0] * fwd[2], right[0] * fwd[1] - right[1] * fwd[0]];
+
+  _x.fromArray(right); _y.fromArray(up); _z.set(-fwd[0], -fwd[1], -fwd[2]); _e.fromArray(eye);
+  _m.makeBasis(_x, _y, _z).setPosition(_e);
+  camera.matrix.copy(_m);
+  camera.updateMatrixWorld(true);
+  camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+  camera.fov = fov;
+  camera.aspect = W / H;
+  camera.near = Math.max(1, dist * 0.05);
+  camera.far = dist * 6;
+  camera.updateProjectionMatrix();
+
+  camState = { eye, fwd, right, up, dist, tanH, halfH: H / (2 * zoom.cur) };
+  groundMat.uniforms.uHalfH.value = camState.halfH;
+  groundMat.uniforms.uPivot.value.set(P[0], P[1]);
+  for (const b of boxes) {
+    b.material.uniforms.uHalfH.value = camState.halfH;
+    b.material.uniforms.uPivot.value.set(P[0], P[1]);
+  }
+}
+
+/* ---------- pointer ↔ world via three ---------- */
+
+const raycaster = new THREE.Raycaster();
+const groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+const _ndc = new THREE.Vector2();
+const _pt = new THREE.Vector3();
+
+function setRay(cssX, cssY) {
+  _ndc.set((cssX / W) * 2 - 1, -((cssY / H) * 2 - 1));
+  raycaster.setFromCamera(_ndc, camera);
+}
+
+function pointerToWorld(cssX, cssY) {
+  setRay(cssX, cssY);
+  const hit = raycaster.ray.intersectPlane(groundPlane, _pt);
+  return hit ? { x: _pt.x, y: _pt.y } : null;
+}
+
+function projectWorld(x, y, z) {
+  const v = new THREE.Vector3(x, y, z).project(camera);
+  if (v.z > 1) return null;
+  return [(v.x + 1) / 2 * W, (1 - v.y) / 2 * H, 1 - v.z];
+}
+
+const EDGE_PX = 9;
+function pick(cssX, cssY) {
+  setRay(cssX, cssY);
+  const hits = raycaster.intersectObjects(boxes.filter(b => b.visible), false);
+  if (!hits.length) return { box: -1, face: 0, mode: '', bound: '' };
+  const hit = hits[0];
+  const box = hit.object.userData.idx;
+  const r = rects[box];
+  if (!r) return { box: -1, face: 0, mode: '', bound: '' };
+  const rk = riseK();
+  const eh = r.h * rk, eb = r.base * rk;
+  const n = hit.face.normal;   // axis-aligned: local == world
+  const face = Math.abs(n.z) > 0.5 ? 1 : (n.x < -0.5 ? 2 : (n.x > 0.5 ? 3 : (n.y < -0.5 ? 4 : 5)));
+  const p = [hit.point.x, hit.point.y, hit.point.z];
+
+  const pxPer = axis => {
+    const s0 = projectWorld(p[0], p[1], p[2]);
+    const s1 = projectWorld(p[0] + axis[0], p[1] + axis[1], p[2] + axis[2]);
+    return (s0 && s1) ? Math.hypot(s1[0] - s0[0], s1[1] - s0[1]) : 0;
+  };
+  const X = [1, 0, 0], Y = [0, 1, 0], Z = [0, 0, 1];
+  const cand = [];
+  if (face === 1) {
+    const kx = pxPer(X), ky = pxPer(Y);
+    cand.push([(p[0] - r.lo[0]) * kx, 'xlo'], [(r.hi[0] - p[0]) * kx, 'xhi']);
+    cand.push([(p[1] - r.lo[1]) * ky, 'ylo'], [(r.hi[1] - p[1]) * ky, 'yhi']);
+  } else if (face === 2 || face === 3) {
+    const ky = pxPer(Y), kz = pxPer(Z);
+    cand.push([(p[1] - r.lo[1]) * ky, 'ylo'], [(r.hi[1] - p[1]) * ky, 'yhi']);
+    cand.push([((eb + eh) - p[2]) * kz, 'z'], [(p[2] - eb) * kz, face === 2 ? 'xlo' : 'xhi']);
+  } else {
+    const kx = pxPer(X), kz = pxPer(Z);
+    cand.push([(p[0] - r.lo[0]) * kx, 'xlo'], [(r.hi[0] - p[0]) * kx, 'xhi']);
+    cand.push([((eb + eh) - p[2]) * kz, 'z'], [(p[2] - eb) * kz, face === 4 ? 'ylo' : 'yhi']);
+  }
+  let bd = '', bdist = 1e9;
+  for (const [d, b] of cand) if (d < bdist) { bdist = d; bd = b; }
+  if (bdist < EDGE_PX) return { box, face, mode: 'resize', bound: bd, p };
+  return { box, face, mode: 'move', bound: '', p };
+}
+
+function axisOnScreen(p, axis) {
+  const s0 = projectWorld(p[0], p[1], p[2]);
+  const s1 = projectWorld(p[0] + axis[0] * 20, p[1] + axis[1] * 20, p[2] + axis[2] * 20);
+  if (!s0 || !s1) return null;
+  const dx = s1[0] - s0[0], dy = s1[1] - s0[1];
+  const len = Math.hypot(dx, dy);
+  return len < 1e-4 ? null : { unit: [dx / len, dy / len], perUnit: len / 20 };
+}
+
+const boundAxis = b => b === 'z' ? [0, 0, 1] : (b[0] === 'x' ? [1, 0, 0] : [0, 1, 0]);
+const resizeCursor = a => !a ? '' : (Math.abs(a.unit[0]) >= Math.abs(a.unit[1]) ? 'ew-resize' : 'ns-resize');
+
+function beginDrag(pk, sx, sy) {
+  const r = rects[pk.box];
+  checkpoint();
+  drag.box = pk.box; drag.mode = pk.mode; drag.bound = pk.bound;
+  drag.sx = sx; drag.sy = sy;
+  drag.lo0 = r.lo.slice(); drag.hi0 = r.hi.slice(); drag.start = r.h;
+  if (pk.mode === 'resize') {
+    const a = axisOnScreen(pk.p, boundAxis(pk.bound));
+    if (!a) return;
+    drag.unit = a.unit; drag.perUnit = a.perUnit;
+    canvas.style.cursor = resizeCursor(a);
+  } else {
+    const g = pointerToWorld(sx, sy);
+    if (!g) return;
+    drag.offX = g.x - r.lo[0]; drag.offY = g.y - r.lo[1];
+    drag.szX = r.hi[0] - r.lo[0]; drag.szY = r.hi[1] - r.lo[1];
+    canvas.style.cursor = 'grabbing';
+  }
+  drag.on = true;
+}
+
+function applyDrag(cx, cy) {
+  const r = rects[drag.box];
+  if (!r) { drag.on = false; return; }
+  if (drag.mode === 'move') {
+    const g = pointerToWorld(cx, cy);
+    if (!g) return;
+    r.lo[0] = snap(g.x - drag.offX); r.lo[1] = snap(g.y - drag.offY);
+    r.hi[0] = r.lo[0] + drag.szX;   r.hi[1] = r.lo[1] + drag.szY;
+    return;
+  }
+  const d = ((cx - drag.sx) * drag.unit[0] + (cy - drag.sy) * drag.unit[1]) / drag.perUnit;
+  const q = Math.round(d / GRID) * GRID;
+  if (drag.bound === 'z')        r.h = Math.max(GRID, Math.min(640, drag.start + q));
+  else if (drag.bound === 'xlo') r.lo[0] = Math.min(drag.lo0[0] + q, r.hi[0] - GRID);
+  else if (drag.bound === 'xhi') r.hi[0] = Math.max(drag.hi0[0] + q, r.lo[0] + GRID);
+  else if (drag.bound === 'ylo') r.lo[1] = Math.min(drag.lo0[1] + q, r.hi[1] - GRID);
+  else if (drag.bound === 'yhi') r.hi[1] = Math.max(drag.hi0[1] + q, r.lo[1] + GRID);
+}
+
+/* ---------- frame loop (render-on-demand) ---------- */
+
+function resize() {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = canvas.clientWidth; H = canvas.clientHeight;
+  renderer.setPixelRatio(dpr);
+  renderer.setSize(W, H, false);
+  ground.position.set(W / 2, H / 2, 0);
+  render(true);
+}
+
+function render(force, t = performance.now()) {
+  rafId = 0;
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0.016);
+  lastT = t;
+
+  const k = reduced ? 1 : 1 - Math.pow(0.0001, dt);
+  cur.x += (target.x - cur.x) * k;
+  cur.y += (target.y - cur.y) * k;
+  tilt.cur += (tilt.tgt - tilt.cur) * (reduced ? 1 : 1 - Math.pow(0.001, dt));
+  zoom.cur += (zoom.tgt - zoom.cur) * (reduced ? 1 : 1 - Math.pow(0.001, dt));
+  orbit.cur += (orbit.tgt - orbit.cur) * (reduced ? 1 : 1 - Math.pow(0.001, dt));
+
+  if (t - lastMove > 700) energy = Math.max(0, energy - 1.6 * dt);
+
+  updateCamera();
+
+  computeBases();
+  const rk = riseK();
+  let growing = false;
+  for (let i = 0; i < MAXB; i++) {
+    const m = boxes[i];
+    const r = rects[i];
+    if (!r) { m.visible = false; boxArrays.uBH.value[i] = 0; continue; }
+    let be = 1;
+    if (r.born) {
+      const g = (t - r.born) / 350;
+      if (g < 1) { be = g * g * (3 - 2 * g); growing = true; } else r.born = 0;
+    }
+    const w = r.hi[0] - r.lo[0], d = r.hi[1] - r.lo[1];
+    const eb = r.base * rk, eh = Math.max(0.001, r.h * rk * be);
+    m.visible = eh > 0.5;
+    m.scale.set(w, d, eh);
+    m.position.set((r.lo[0] + r.hi[0]) / 2, (r.lo[1] + r.hi[1]) / 2, eb + eh / 2 + 0.01);
+    m.updateMatrixWorld();
+    m.material.uniforms.uLo.value.set(r.lo[0], r.lo[1], eb);
+    m.material.uniforms.uHi.value.set(r.hi[0], r.hi[1], eb + eh);
+    m.material.uniforms.uHovOn.value = (tilt.cur > 0.25 && hover.box === i) ? 1 : 0;
+    m.material.uniforms.uHovFace.value = (hover.box === i && hover.mode === 'move') ? hover.face : 0;
+    boxArrays.uBLo.value[i].set(r.lo[0], r.lo[1]);
+    boxArrays.uBHi.value[i].set(r.hi[0], r.hi[1]);
+    boxArrays.uBB.value[i] = eb;
+    boxArrays.uBH.value[i] = eh;
+  }
+  boxArrays.uN.value = rects.length;
+
+  const gu = groundMat.uniforms;
+  gu.uRaw.value.set(raw.x, raw.y);
+  gu.uCross.value.set(cur.x, cur.y);
+  gu.uEnergy.value = energy;
+  gu.uPulse.value = reduced ? 0.85 : 0.7 + 0.3 * Math.sin(t / 1000 * 2.6);
+  gu.uOrthoK.value = 1 - Math.min(1, Math.max(0, (tilt.cur * tilt.cur * (3 - 2 * tilt.cur)) / 0.35));
+  if (meas.on) {
+    gu.uMeas.value.set(Math.min(meas.ax, cur.x), Math.min(meas.ay, cur.y),
+                       Math.max(meas.ax, cur.x), Math.max(meas.ay, cur.y));
+    gu.uMeasA.value = 1;
+  } else gu.uMeasA.value = 0;
+
+  renderer.render(scene, camera);
+
+  // DOM readout + dimension labels
+  const m2 = meas.on;
+  const rs = projectWorld(cur.x, cur.y, 0);
+  readout.textContent = m2
+    ? `w: ${Math.abs(Math.round(target.x - meas.ax))} · h: ${Math.abs(Math.round(target.y - meas.ay))}`
+    : `x: ${Math.round(target.x)} · y: ${Math.round(target.y)}`;
+  if (rs) readout.style.transform = `translate(${Math.round(rs[0]) + 14}px, ${Math.round(rs[1]) + 16}px)`;
+  readout.style.opacity = m2 ? '1'
+    : (tilt.cur < 0.2 && energy > 0.03) ? String(Math.min(1, energy * 1.6)) : '0';
+
+  const hb = (tilt.cur > 0.25 && hover.box >= 0) ? rects[hover.box] : null;
+  if (hb) {
+    const eh = hb.h * riseK(), eb = hb.base * riseK();
+    const cxm = (hb.lo[0] + hb.hi[0]) / 2, cym = (hb.lo[1] + hb.hi[1]) / 2;
+    place(dw, `w: ${Math.round(hb.hi[0] - hb.lo[0])}`, projectWorld(cxm, hb.lo[1], eb), -18, 14);
+    place(dh, `h: ${Math.round(hb.hi[1] - hb.lo[1])}`, projectWorld(hb.hi[0], cym, eb), 12, 0);
+    place(dz, `z: ${Math.round(hb.h)}`, projectWorld(hb.lo[0], hb.lo[1], eb + eh / 2), -56, -6);
+  } else {
+    dw.style.opacity = dh.style.opacity = dz.style.opacity = '0';
+  }
+
+  const tilted = tilt.cur > 0.25;
+  if (tilted !== hintTilted) {
+    hintTilted = tilted;
+    hint.innerHTML = tilted
+      ? '<em>click&ndash;click</em> drafts &nbsp;&middot;&nbsp; <em>faces</em> move &nbsp;&middot;&nbsp; <em>lines</em> resize &nbsp;&middot;&nbsp; <em>swipe</em> orbits &nbsp;&middot;&nbsp; <em>pinch</em> zooms &nbsp;&middot;&nbsp; <em>backspace</em> deletes &nbsp;&middot;&nbsp; <em>esc</em> flattens'
+      : '<em>click&ndash;click</em> to draft &nbsp;&middot;&nbsp; <em>scroll</em> to tilt &nbsp;&middot;&nbsp; <em>pinch</em> to zoom &nbsp;&middot;&nbsp; <em>&#8984;z</em> undoes &nbsp;&middot;&nbsp; <em>url</em> is a share link';
+  }
+
+  const settled = Math.abs(cur.x - target.x) < 0.05 && Math.abs(cur.y - target.y) < 0.05;
+  const tilting = Math.abs(tilt.cur - tilt.tgt) > 0.0015;
+  const zooming = Math.abs(zoom.cur - zoom.tgt) > 0.0015;
+  const orbiting = Math.abs(orbit.cur - orbit.tgt) > 0.0015;
+  if (!force && (energy > 0.004 || !settled || tilting || zooming || orbiting || meas.on || growing)) schedule();
+  else running = false;
+}
+
+const frame = t => render(false, t);
+function schedule() { running = true; if (!rafId) rafId = requestAnimationFrame(frame); }
+function kick() { if (!running) { lastT = performance.now(); schedule(); } }
+
+/* ---------- input ---------- */
+
+addEventListener('pointermove', e => {
+  if (drag.on) {
+    applyDrag(e.clientX, e.clientY);
+    lastMove = performance.now();
+    energy = 1;
+    kick();
+    return;
+  }
+  const w = pointerToWorld(e.clientX, e.clientY);
+  if (w) {
+    raw.x = w.x; raw.y = w.y;
+    target.x = snap(w.x); target.y = snap(w.y);
+    if (cur.x < -1e3) { cur.x = target.x; cur.y = target.y; }
+  }
+  if (tilt.cur > 0.25) {
+    const pk = pick(e.clientX, e.clientY);
+    hover.box = pk.box; hover.mode = pk.mode; hover.bound = pk.bound;
+    hover.face = pk.mode === 'move' ? pk.face : 0;
+    canvas.style.cursor = pk.box < 0 ? ''
+      : pk.mode === 'move' ? 'grab'
+      : resizeCursor(axisOnScreen(pk.p, boundAxis(pk.bound)));
+  } else if (hover.box !== -1) {
+    hover.box = -1; hover.face = 0; hover.mode = ''; canvas.style.cursor = '';
+  }
+  lastMove = performance.now();
+  energy = 1;
+  kick();
+}, { passive: true });
+
+addEventListener('pointerdown', e => {
+  if (e.target.closest && e.target.closest('a, button, select, input')) return;
+  if (tilt.cur > 0.25) {
+    const w = pointerToWorld(e.clientX, e.clientY);
+    if (meas.on) {
+      meas.on = false;
+      if (w) commitRect(snap(w.x), snap(w.y));
+      kick();
+      return;
+    }
+    const pk = pick(e.clientX, e.clientY);
+    if (pk.box >= 0) {
+      hover.box = pk.box; hover.mode = pk.mode; hover.bound = pk.bound;
+      hover.face = pk.mode === 'move' ? pk.face : 0;
+      beginDrag(pk, e.clientX, e.clientY);
+    } else if (w) {
+      meas.on = true;
+      meas.ax = snap(w.x); meas.ay = snap(w.y);
+    }
+    kick();
+    return;
+  }
+  if (tilt.cur > 0.2) return;
+  const w = pointerToWorld(e.clientX, e.clientY);
+  if (!w) return;
+  if (!meas.on) {
+    meas.on = true;
+    meas.ax = snap(w.x); meas.ay = snap(w.y);
+  } else {
+    meas.on = false;
+    commitRect(snap(w.x), snap(w.y));
+  }
+  kick();
+}, { passive: true });
+
+addEventListener('pointerup', () => {
+  if (drag.on) {
+    drag.on = false;
+    canvas.style.cursor = hover.box >= 0 ? 'grab' : '';
+    persist();
+    kick();
+  }
+}, { passive: true });
+
+addEventListener('wheel', e => {
+  e.preventDefault();
+  if (e.ctrlKey) {
+    zoom.tgt = Math.max(0.45, Math.min(2.4, zoom.tgt * Math.exp(-e.deltaY * 0.012)));
+  } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+    orbit.tgt += e.deltaX * 0.0035;
+  } else {
+    tilt.tgt = Math.max(0, Math.min(1, tilt.tgt + e.deltaY * 0.0011));
+  }
+  persist();
+  kick();
+}, { passive: false });
+
+addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+    e.preventDefault();
+    undo();
+    return;
+  }
+  if ((e.key === 'Backspace' || e.key === 'Delete') && tilt.cur > 0.25 && hover.box >= 0) {
+    checkpoint();
+    rects.splice(hover.box, 1);
+    hover.box = -1; hover.face = 0; drag.on = false;
+    canvas.style.cursor = '';
+    persist();
+    kick();
+    return;
+  }
+  if (e.key !== 'Escape') return;
+  if (meas.on) meas.on = false;
+  else if (tilt.tgt > 0.01) tilt.tgt = 0;
+  else zoom.tgt = 1;
+  kick();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { if (rafId) cancelAnimationFrame(rafId); rafId = 0; running = false; }
+  else render(true);
+});
+addEventListener('resize', resize);
+
+// restore a shared link, else last session's drawing
+(() => {
+  const dm = location.hash.match(/d=([^&]*)/);
+  let list = dm && deserialize(decodeURIComponent(dm[1]));
+  if (!list) { try { list = deserialize(localStorage.getItem(STORE_KEY)); } catch (e) { /* ignore */ } }
+  if (list && list.length) for (const r of list) rects.push(r);
+  const vm = location.hash.match(/v=([^&]+)/);
+  if (vm) {
+    const [t, o, z] = vm[1].split(',').map(Number);
+    if (Number.isFinite(t)) tilt.tgt = Math.max(0, Math.min(1, t));
+    if (Number.isFinite(o)) orbit.tgt = o;
+    if (Number.isFinite(z)) zoom.tgt = Math.max(0.45, Math.min(2.4, z));
+  }
+})();
+
+resize();
+kick();
+
+// verification hooks (harmless in normal use)
+window.__project = projectWorld;
+window.__tstate = () => ({ tilt: tilt.cur, zoom: zoom.cur, orbit: orbit.cur, hover: { ...hover },
+  rects: rects.map(r => ({ lo: r.lo.slice(), hi: r.hi.slice(), h: r.h, base: r.base || 0 })) });
+</script>
+</body>
+</html>

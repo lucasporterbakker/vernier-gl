@@ -13,8 +13,11 @@ scale that made calipers precise.
 
 One fragment shader. Zero dependencies. Zero animation frames at idle.
 
-> **Demo:** run `npx serve` in this repo and open `/demo/`. Hosted demo
-> coming with the first release.
+> **Demos:** run `npx serve` in this repo, then open
+> `/demo/` (the instrument), `/demo/table.html` (**the drafting table** —
+> draft a plan, tilt the sheet, and sculpt it in perspective), or
+> `/demo/table-three.html` (the same table on a three.js scene graph).
+> Hosted demo coming with the first release.
 
 ## Quick start
 
