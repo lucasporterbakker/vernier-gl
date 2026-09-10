@@ -13,11 +13,45 @@ scale that made calipers precise.
 
 One fragment shader. Zero dependencies. Zero animation frames at idle.
 
-> **Demos:** run `npx serve` in this repo, then open
-> `/demo/` (the instrument), `/demo/table.html` (**the drafting table** —
-> draft a plan, tilt the sheet, and sculpt it in perspective), or
-> `/demo/table-three.html` (the same table on a three.js scene graph).
+> **Demos:** run `npx serve` in this repo, then open `/demo/` for the
+> instrument, or `/demo/table.html` for the drafting table below.
 > Hosted demo coming with the first release.
+
+## The drafting table
+
+`/demo/table.html` — what happens when the grid becomes a drawing surface.
+
+Draft measured rectangles on the flat sheet and they stay as your plan.
+Scroll, and the sheet tilts: the camera lifts from plan into perspective
+and every rectangle stands up into a volume. Now sculpt it — the middle of
+a face is a hand that slides the whole volume, an edge is a resize handle
+that stretches the footprint or pulls the height, and everything stays
+snapped to the grid with its dimensions live. Draw one plate over another
+and it stacks; drag the support away and what sat on it drops.
+
+| gesture | what it does |
+|---------|--------------|
+| click–click | draft a plate (flat or tilted) |
+| scroll | tilt the sheet between plan and perspective |
+| sideways scroll | orbit the model |
+| pinch | zoom |
+| drag a face | move the volume across the sheet |
+| drag an edge | resize the footprint, or pull the height |
+| backspace | delete what you're hovering |
+| ⌘Z | undo |
+| esc | cancel a measurement, then flatten, then reset zoom |
+
+Whatever you draw is encoded in the URL, so the address bar is a share
+link, and it is kept in `localStorage` between visits.
+
+A fixed sun gives the volumes lambert tone and casts soft shadows with a
+penumbra that widens as it travels — computed analytically in the fragment
+shader rather than with shadow maps, which blur the hairlines.
+
+`/demo/table-three.html` is the same table rebuilt on a three.js scene
+graph: `BoxGeometry` volumes wearing graph-paper `ShaderMaterial`s, a
+`PerspectiveCamera` whose fov morphs from 2° to 31° while the dolly
+compensates so the plan never pops, and `Raycaster` picking.
 
 ## Quick start
 
