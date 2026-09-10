@@ -13,13 +13,14 @@ scale that made calipers precise.
 
 One fragment shader. Zero dependencies. Zero animation frames at idle.
 
-> **Demos:** run `npx serve` in this repo, then open `/demo/` for the
-> instrument, or `/demo/table.html` for the drafting table below.
-> Hosted demo coming with the first release.
+> **Live demo:** **[the drafting table](https://lucasporterbakker.github.io/vernier-gl/)**
+> — or run `npx serve` in this repo and open `/` for it, `/demo/` for the
+> instrument on its own, and `/demo/table.html` for the zero-dependency
+> table.
 
 ## The drafting table
 
-`/demo/table.html` — what happens when the grid becomes a drawing surface.
+What happens when the grid becomes a drawing surface.
 
 Draft measured rectangles on the flat sheet and they stay as your plan.
 Scroll, and the sheet tilts: the camera lifts from plan into perspective
@@ -48,10 +49,12 @@ A fixed sun gives the volumes lambert tone and casts soft shadows with a
 penumbra that widens as it travels — computed analytically in the fragment
 shader rather than with shadow maps, which blur the hairlines.
 
-`/demo/table-three.html` is the same table rebuilt on a three.js scene
-graph: `BoxGeometry` volumes wearing graph-paper `ShaderMaterial`s, a
-`PerspectiveCamera` whose fov morphs from 2° to 31° while the dolly
-compensates so the plan never pops, and `Raycaster` picking.
+It ships in two editions. `index.html` (the live demo above) is built on a
+three.js scene graph: `BoxGeometry` volumes wearing graph-paper
+`ShaderMaterial`s, a `PerspectiveCamera` whose fov morphs from 2° to 31°
+while the dolly compensates so the plan never pops, and `Raycaster`
+picking. `/demo/table.html` is the same table with zero dependencies —
+one fragment shader raytracing the volumes itself.
 
 ## Quick start
 
