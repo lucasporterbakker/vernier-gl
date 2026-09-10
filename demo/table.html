@@ -348,9 +348,67 @@ function commitRect(hx, hy) {
   const hi = [Math.max(meas.ax, hx), Math.max(meas.ay, hy)];
   const bw = hi[0] - lo[0], bh = hi[1] - lo[1];
   if (bw >= GRID && bh >= GRID) {
+    checkpoint();
     rects.push({ lo, hi, h: Math.max(24, Math.min(280, Math.min(bw, bh))), base: 0, born: performance.now() });
     if (rects.length > MAXB) rects.shift();
+    persist();
   }
+}
+
+/* ---------- share links, undo, persistence ---------- */
+
+const STORE_KEY = 'vernier-table';
+
+// the whole drawing as grid-unit integers: "x.y.w.h.z" per box, "_"-joined
+function serialize() {
+  return rects.map(r => [r.lo[0] / GRID, r.lo[1] / GRID,
+    (r.hi[0] - r.lo[0]) / GRID, (r.hi[1] - r.lo[1]) / GRID, r.h / GRID]
+    .map(Math.round).join('.')).join('_');
+}
+
+function deserialize(s) {
+  if (!s) return null;
+  const out = [];
+  for (const tok of s.split('_')) {
+    const v = tok.split('.').map(Number);
+    if (v.length !== 5 || !v.every(Number.isFinite)) return null;
+    const [x, y, w, h, z] = v;
+    if (w < 1 || h < 1) return null;
+    out.push({ lo: [x * GRID, y * GRID], hi: [(x + w) * GRID, (y + h) * GRID],
+               h: Math.max(GRID, Math.min(640, z * GRID)), base: 0, born: 0 });
+    if (out.length >= MAXB) break;
+  }
+  return out;
+}
+
+// the address bar is the share link; localStorage keeps it across reloads
+let saveT = 0;
+function persist() {
+  clearTimeout(saveT);
+  saveT = setTimeout(() => {
+    const d = serialize();
+    try { localStorage.setItem(STORE_KEY, d); } catch (e) { /* private mode */ }
+    const v = `${tilt.tgt.toFixed(2)},${orbit.tgt.toFixed(2)},${zoom.tgt.toFixed(2)}`;
+    try { history.replaceState(null, '', d ? `#d=${d}&v=${v}` : location.pathname); } catch (e) { /* sandboxed */ }
+  }, 250);
+}
+
+const hist = [];
+function checkpoint() {
+  hist.push(serialize());
+  if (hist.length > 50) hist.shift();
+}
+
+function undo() {
+  const s = hist.pop();
+  if (s === undefined) return;
+  const list = deserialize(s) || [];
+  rects.length = 0;
+  for (const r of list) rects.push(r);
+  hover.box = -1; hover.face = 0; hover.mode = ''; drag.on = false;
+  canvas.style.cursor = '';
+  persist();
+  kick();
 }
 
 const readout = document.getElementById('readout');
@@ -502,6 +560,7 @@ const resizeCursor = a => !a ? '' : (Math.abs(a.unit[0]) >= Math.abs(a.unit[1]) 
 
 function beginDrag(pk, sx, sy) {
   const r = rects[pk.box];
+  checkpoint();   // one undo step per gesture
   drag.box = pk.box; drag.mode = pk.mode; drag.bound = pk.bound;
   drag.sx = sx; drag.sy = sy;
   drag.lo0 = r.lo.slice(); drag.hi0 = r.hi.slice(); drag.start = r.h;
@@ -639,7 +698,7 @@ function render(force, t = performance.now()) {
     hintTilted = tilted;
     hint.innerHTML = tilted
       ? '<em>click&ndash;click</em> drafts &nbsp;&middot;&nbsp; <em>faces</em> move &nbsp;&middot;&nbsp; <em>lines</em> resize &nbsp;&middot;&nbsp; <em>swipe</em> orbits &nbsp;&middot;&nbsp; <em>pinch</em> zooms &nbsp;&middot;&nbsp; <em>backspace</em> deletes &nbsp;&middot;&nbsp; <em>esc</em> flattens'
-      : '<em>click&ndash;click</em> to draft &nbsp;&middot;&nbsp; <em>scroll</em> to tilt &nbsp;&middot;&nbsp; <em>pinch</em> to zoom &nbsp;&middot;&nbsp; <em>esc</em> flattens';
+      : '<em>click&ndash;click</em> to draft &nbsp;&middot;&nbsp; <em>scroll</em> to tilt &nbsp;&middot;&nbsp; <em>pinch</em> to zoom &nbsp;&middot;&nbsp; <em>&#8984;z</em> undoes &nbsp;&middot;&nbsp; <em>url</em> is a share link';
   }
 
   const settled = Math.abs(cur.x - target.x) < 0.05 && Math.abs(cur.y - target.y) < 0.05;
@@ -724,6 +783,7 @@ addEventListener('pointerup', () => {
   if (drag.on) {
     drag.on = false;
     canvas.style.cursor = hover.box >= 0 ? 'grab' : '';
+    persist();
     kick();
   }
 }, { passive: true });
@@ -737,14 +797,22 @@ addEventListener('wheel', e => {
   } else {
     tilt.tgt = Math.max(0, Math.min(1, tilt.tgt + e.deltaY * 0.0011));
   }
+  persist();   // the address bar carries the view too
   kick();
 }, { passive: false });
 
 addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+    e.preventDefault();
+    undo();
+    return;
+  }
   if ((e.key === 'Backspace' || e.key === 'Delete') && tilt.cur > 0.25 && hover.box >= 0) {
+    checkpoint();
     rects.splice(hover.box, 1);
     hover.box = -1; hover.face = 0; drag.on = false;
     canvas.style.cursor = '';
+    persist();
     kick();
     return;
   }
@@ -765,7 +833,24 @@ document.addEventListener('visibilitychange', () => {
   else render(true);
 });
 addEventListener('resize', resize);
+
+// restore a shared link, else last session's drawing
+(() => {
+  const dm = location.hash.match(/d=([^&]*)/);
+  let list = dm && deserialize(decodeURIComponent(dm[1]));
+  if (!list) { try { list = deserialize(localStorage.getItem(STORE_KEY)); } catch (e) { /* ignore */ } }
+  if (list && list.length) for (const r of list) rects.push(r);
+  const vm = location.hash.match(/v=([^&]+)/);
+  if (vm) {
+    const [t, o, z] = vm[1].split(',').map(Number);
+    if (Number.isFinite(t)) tilt.tgt = Math.max(0, Math.min(1, t));
+    if (Number.isFinite(o)) orbit.tgt = o;
+    if (Number.isFinite(z)) zoom.tgt = Math.max(0.45, Math.min(2.4, z));
+  }
+})();
+
 resize();
+kick();   // a restored view (tilt/orbit/zoom targets) animates in on its own
 </script>
 </body>
 </html>
