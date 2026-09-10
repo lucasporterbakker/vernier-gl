@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vernier — drafting table</title>
+<style>
+  :root {
+    --bg: #0e0f15; --fg: #e6edf3; --fg1: #9aa5ce;
+    --line: #58a6ff; --ac: #a9c1fa;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+  canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 2;
+    display: flex; align-items: baseline; gap: 14px; padding: 18px 22px;
+    pointer-events: none; user-select: none;
+  }
+  nav b { font-weight: 600; letter-spacing: 0.02em; }
+  nav span { color: var(--fg1); font-size: 11px; }
+  #hint {
+    position: fixed; left: 22px; bottom: 16px; z-index: 2;
+    color: var(--fg1); font-size: 11px; letter-spacing: 0.02em;
+    user-select: none; pointer-events: none;
+  }
+  #hint em { font-style: normal; color: var(--fg); }
+  #readout {
+    position: fixed; left: 0; top: 0; z-index: 2; pointer-events: none;
+    color: var(--ac); font-size: 11px; white-space: nowrap;
+    opacity: 0; will-change: transform;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<nav><b>vernier</b><span>drafting table</span></nav>
+<div id="hint"><em>click–click</em> to draft &nbsp;·&nbsp; <em>scroll</em> to tilt the sheet &nbsp;·&nbsp; <em>esc</em> flattens</div>
+<div id="readout" aria-hidden="true"></div>
+
+<script type="module">
+/* vernier — drafting table spike.
+   Plan mode is the vernier grid: snap, measure, release — but rects persist
+   as your plan. Scroll tips the sheet into perspective (ortho collapses into
+   a real camera) and the plan rises into hairline wireframe volumes,
+   analytically raytraced in one fragment shader. Esc flattens. */
+
+const MAXB = 16;
+
+const VERT = `#version 300 es
+void main() {
+  vec2 v = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  gl_Position = vec4(v * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FRAG = `#version 300 es
+precision highp float;
+out vec4 O;
+
+uniform vec2  uRes;       // device px
+uniform float uDpr;
+uniform vec3  uEye, uFwd, uRight, uUp;
+uniform vec2  uHalf;      // ortho half extents (world units)
+uniform vec2  uTan;       // perspective tan half-fov (x, y)
+uniform float uOrthoK;    // 1 = pure ortho plan, 0 = pure perspective
+uniform vec2  uRawW;      // pointer on ground, world xy
+uniform vec2  uCrossW;    // eased snap point, world xy
+uniform float uEnergy;
+uniform float uPulse;
+uniform vec4  uMeas;      // active rect: lo.xy, hi.xy (world)
+uniform float uMeasA;
+uniform vec2  uBoxLo[${MAXB}];
+uniform vec2  uBoxHi[${MAXB}];
+uniform float uBoxH[${MAXB}];
+uniform int   uNBox;
+uniform vec3  uBg, uLine, uAc;
+
+// screen-px antialiased line: d = world distance, fw = its screen footprint
+float lineAA(float d, float fw) { return 1.0 - smoothstep(0.5, 1.5, d / max(fw, 1e-6)); }
+
+// grid line mask at spacing s for world coords q (fw = per-axis footprint)
+float gridAA(vec2 q, float s, vec2 fw, out float moire) {
+  vec2 g = abs(q / s - round(q / s)) * s;
+  vec2 a = g / max(fw, vec2(1e-6));
+  moire = smoothstep(2.5, 5.0, s / max(fw.x, fw.y)); // fade before cells alias
+  return (1.0 - smoothstep(0.5, 1.5, min(a.x, a.y))) * moire;
+}
+
+void main() {
+  vec2 ndc = (gl_FragCoord.xy / uRes) * 2.0 - 1.0;
+
+  // ortho plan camera morphs into a perspective one
+  vec3 roP = uEye;
+  vec3 rdP = normalize(uFwd + ndc.x * uTan.x * uRight + ndc.y * uTan.y * uUp);
+  vec3 roO = uEye + ndc.x * uHalf.x * uRight + ndc.y * uHalf.y * uUp;
+  vec3 ro = mix(roP, roO, uOrthoK);
+  vec3 rd = normalize(mix(rdP, uFwd, uOrthoK));
+  rd = mix(rd, vec3(1e-6), vec3(lessThan(abs(rd), vec3(1e-6))));
+
+  // nearest hit: ground plane z=0, then each box
+  float t = 1e9; int mat = -1; int bi = -1; vec3 n = vec3(0.0, 0.0, 1.0);
+  if (rd.z < 0.0) { t = -ro.z / rd.z; mat = 0; }
+  for (int i = 0; i < ${MAXB}; i++) {
+    if (i >= uNBox) break;
+    if (uBoxH[i] < 0.5) continue;   // flat plans render as footprints on the sheet
+    vec3 blo = vec3(uBoxLo[i], 0.0), bhi = vec3(uBoxHi[i], uBoxH[i]);
+    vec3 inv = 1.0 / rd;
+    vec3 t0 = (blo - ro) * inv, t1 = (bhi - ro) * inv;
+    vec3 tmin = min(t0, t1), tmax = max(t0, t1);
+    float tn = max(max(tmin.x, tmin.y), tmin.z);
+    float tf = min(min(tmax.x, tmax.y), tmax.z);
+    if (tn > tf || tf < 0.0 || tn <= 0.0 || tn >= t) continue;
+    t = tn; mat = 1; bi = i;
+    if (tmin.x > tmin.y && tmin.x > tmin.z) n = vec3(-sign(rd.x), 0.0, 0.0);
+    else if (tmin.y > tmin.z) n = vec3(0.0, -sign(rd.y), 0.0);
+    else n = vec3(0.0, 0.0, -sign(rd.z));
+  }
+
+  vec3 col = uBg;
+  if (mat < 0) { O = vec4(col, 1.0); return; }
+
+  vec3 p = ro + rd * t;
+  // screen footprint of the world position (per world axis)
+  vec2 fwXY = vec2(length(vec2(dFdx(p.x), dFdy(p.x))), length(vec2(dFdx(p.y), dFdy(p.y))));
+  float fwZ = length(vec2(dFdx(p.z), dFdy(p.z)));
+  float fade = exp(-max(t - uHalf.y * 1.6, 0.0) * 0.0012);
+
+  if (mat == 0) {
+    // ---- ground: the drafting sheet ----
+    float pr = distance(p.xy, uRawW);
+    float sigma = 180.0;
+    float lift = uEnergy * exp(-(pr * pr) / (2.0 * sigma * sigma));
+
+    // committed pane glass under the active measurement
+    vec2 lo = uMeas.xy, hi = uMeas.zw;
+    float inR = step(lo.x, p.x) * step(p.x, hi.x) * step(lo.y, p.y) * step(p.y, hi.y);
+    float glass = inR * uMeasA;
+
+    float m1, m2;
+    float minor = gridAA(p.xy, 8.0, fwXY, m1) * (0.028 + 0.105 * lift + 0.055 * glass);
+    float major = gridAA(p.xy, 64.0, fwXY, m2) * (0.060 + 0.150 * lift + 0.075 * glass);
+
+    // vertex dots on the major grid
+    vec2 gm = abs(p.xy / 64.0 - round(p.xy / 64.0)) * 64.0;
+    vec2 am = gm / max(fwXY, vec2(1e-6));
+    float dots = (1.0 - smoothstep(1.0, 2.2, max(am.x, am.y))) * max(lift * 0.85, glass * 0.6) * m2;
+
+    // crosshair + handle at the eased snap point
+    vec2 dcw = abs(p.xy - uCrossW);
+    vec2 ac = dcw / max(fwXY, vec2(1e-6));
+    float cross = (1.0 - smoothstep(0.5, 1.5, min(ac.x, ac.y))) * uEnergy * 0.20;
+    float boxd = max(ac.x, ac.y);
+    float ring = (1.0 - smoothstep(0.5, 1.5, abs(boxd - 7.0))) * uEnergy;
+    float inner = 1.0 - smoothstep(5.5, 7.0, boxd);
+
+    // active measurement pane: border + edge glow
+    float ex = min(abs(p.x - lo.x), abs(p.x - hi.x));
+    float ey = min(abs(p.y - lo.y), abs(p.y - hi.y));
+    float inX = step(lo.x - 4.0, p.x) * step(p.x, hi.x + 4.0);
+    float inY = step(lo.y - 4.0, p.y) * step(p.y, hi.y + 4.0);
+    float mBorder = max(lineAA(ex, fwXY.x) * inY * step(lo.y, p.y) * step(p.y, hi.y),
+                        lineAA(ey, fwXY.y) * inX * step(lo.x, p.x) * step(p.x, hi.x)) * uMeasA;
+    float edgeIn = max(min(min(p.x - lo.x, hi.x - p.x), min(p.y - lo.y, hi.y - p.y)), 0.0);
+    float glow = exp(-edgeIn / 16.0) * glass;
+
+    // drafted footprints stay inked on the sheet
+    float fpB = 0.0, fpF = 0.0;
+    for (int i = 0; i < ${MAXB}; i++) {
+      if (i >= uNBox) break;
+      vec2 l2 = uBoxLo[i], h2 = uBoxHi[i];
+      float iX = step(l2.x, p.x) * step(p.x, h2.x);
+      float iY = step(l2.y, p.y) * step(p.y, h2.y);
+      float ex2 = min(abs(p.x - l2.x), abs(p.x - h2.x));
+      float ey2 = min(abs(p.y - l2.y), abs(p.y - h2.y));
+      fpB = max(fpB, max(lineAA(ex2, fwXY.x) * iY, lineAA(ey2, fwXY.y) * iX));
+      fpF = max(fpF, iX * iY);
+    }
+
+    col += (uLine * (minor + major) * (1.0 - inner * uEnergy)) * fade;
+    col += uAc * fpF * 0.030;
+    col += uAc * fpB * 0.40 * fade;
+    col += uLine * cross * (1.0 - inner);
+    col += uAc * dots * fade;
+    col += uLine * lift * 0.012;
+    col += uAc * glass * 0.055;
+    col += uAc * glow * 0.05;
+    col += uAc * mBorder * 0.55;
+    col += uAc * ring * uPulse;
+  } else {
+    // ---- a drafted volume: graph paper wrapped around a box ----
+    vec2 lo = uBoxLo[bi], hi = uBoxHi[bi];
+    float h = uBoxH[bi];
+
+    // face-local 2D coords + their screen footprints
+    vec2 q, fq; float e1, e2, f1, f2;
+    if (abs(n.z) > 0.5)      { q = p.xy; fq = fwXY; e1 = min(p.x - lo.x, hi.x - p.x); f1 = fwXY.x; e2 = min(p.y - lo.y, hi.y - p.y); f2 = fwXY.y; }
+    else if (abs(n.x) > 0.5) { q = vec2(p.y, p.z); fq = vec2(fwXY.y, fwZ); e1 = min(p.y - lo.y, hi.y - p.y); f1 = fwXY.y; e2 = min(p.z, h - p.z); f2 = fwZ; }
+    else                     { q = vec2(p.x, p.z); fq = vec2(fwXY.x, fwZ); e1 = min(p.x - lo.x, hi.x - p.x); f1 = fwXY.x; e2 = min(p.z, h - p.z); f2 = fwZ; }
+
+    // faces keep the drafting grid, toned by orientation
+    float shade = abs(n.z) > 0.5 ? 1.0 : (abs(n.x) > 0.5 ? 0.55 : 0.75);
+    float m1, m2;
+    float minor = gridAA(q, 8.0, fq, m1) * 0.050 * shade;
+    float major = gridAA(q, 64.0, fq, m2) * 0.085 * shade;
+
+    // hairline wireframe on the face boundary
+    float edge = max(lineAA(e1, f1), lineAA(e2, f2));
+
+    col += uBg * 0.35 * shade;                 // faces lift off the ground
+    col += uLine * (minor + major) * fade;
+    col += uAc * abs(n.z) * 0.020;             // roofs catch a little accent
+    col += uAc * edge * 0.75 * fade;
+  }
+
+  O = vec4(col, 1.0);
+}`;
+
+/* ---------- gl setup ---------- */
+
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false, stencil: false });
+if (!gl) { document.getElementById('hint').textContent = 'WebGL2 unavailable'; throw new Error('no webgl2'); }
+
+const compile = (type, src) => {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+};
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const U = {};
+for (const n of ['uRes','uDpr','uEye','uFwd','uRight','uUp','uHalf','uTan','uOrthoK','uRawW','uCrossW',
+                 'uEnergy','uPulse','uMeas','uMeasA','uBoxLo','uBoxHi','uBoxH','uNBox','uBg','uLine','uAc'])
+  U[n] = gl.getUniformLocation(prog, n);
+
+const hex01 = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
+gl.uniform3fv(U.uBg, hex01('#0e0f15'));
+gl.uniform3fv(U.uLine, hex01('#58a6ff'));
+gl.uniform3fv(U.uAc, hex01('#a9c1fa'));
+
+/* ---------- state ---------- */
+
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const GRID = 8, TAN = 0.28;
+let dpr = 1, W = 0, H = 0;
+let energy = 0, lastMove = -1e9, lastT = 0, rafId = 0, running = false;
+
+const raw = { x: -1e4, y: -1e4 };     // world xy (y-up)
+const target = { x: -1e4, y: -1e4 };
+const cur = { x: -1e4, y: -1e4 };
+const meas = { on: false, ax: 0, ay: 0 };
+const tilt = { cur: 0, tgt: 0 };
+const rects = [];                     // {lo:[x,y], hi:[x,y], h}
+
+const boxLo = new Float32Array(MAXB * 2);
+const boxHi = new Float32Array(MAXB * 2);
+const boxH = new Float32Array(MAXB);
+
+const readout = document.getElementById('readout');
+const snap = v => Math.round(v / GRID) * GRID;
+
+/* ---------- camera ---------- */
+
+function camera(T) {
+  const ease = T * T * (3 - 2 * T);
+  const el = (90 - 55 * ease) * Math.PI / 180;
+  const az = (-25 * ease) * Math.PI / 180;
+  const P = [W / 2, H / 2, 0];
+  const dist = H / (2 * TAN);
+  const eye = [
+    P[0] + dist * Math.sin(az) * Math.cos(el),
+    P[1] - dist * Math.cos(az) * Math.cos(el),
+    P[2] + dist * Math.sin(el),
+  ];
+  const norm = v => { const l = Math.hypot(...v); return v.map(x => x / l); };
+  const fwd = norm([P[0] - eye[0], P[1] - eye[1], P[2] - eye[2]]);
+  let right;
+  if (Math.abs(fwd[2]) > 0.999) right = [1, 0, 0];
+  else right = norm([fwd[1] * 1 - fwd[2] * 0, fwd[2] * 0 - fwd[0] * 1, 0]); // fwd × (0,0,1)
+  const up = [right[1] * fwd[2] - right[2] * fwd[1], right[2] * fwd[0] - right[0] * fwd[2], right[0] * fwd[1] - right[1] * fwd[0]];
+  const orthoK = 1 - Math.min(1, Math.max(0, ease / 0.35));
+  return { eye, fwd, right, up, orthoK };
+}
+
+let cam = null;
+function pointerToWorld(cssX, cssY) {
+  const ndcX = (cssX / W) * 2 - 1, ndcY = ((H - cssY) / H) * 2 - 1;
+  const c = cam || camera(0);
+  const mix3 = (a, b, k) => a.map((v, i) => v + (b[i] - v) * k);
+  const roP = c.eye;
+  let rdP = [0, 1, 2].map(i => c.fwd[i] + ndcX * TAN * (W / H) * c.right[i] + ndcY * TAN * c.up[i]);
+  const roO = [0, 1, 2].map(i => c.eye[i] + ndcX * (W / 2) * c.right[i] + ndcY * (H / 2) * c.up[i]);
+  const ro = mix3(roP, roO, c.orthoK);
+  let rd = mix3(rdP, c.fwd, c.orthoK);
+  const l = Math.hypot(...rd); rd = rd.map(v => v / l);
+  if (rd[2] >= -1e-6) return null;
+  const t = -ro[2] / rd[2];
+  return { x: ro[0] + rd[0] * t, y: ro[1] + rd[1] * t };
+}
+
+/* ---------- frame loop (render-on-demand) ---------- */
+
+function resize() {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = canvas.clientWidth; H = canvas.clientHeight;
+  canvas.width = Math.max(1, Math.round(W * dpr));
+  canvas.height = Math.max(1, Math.round(H * dpr));
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.uniform2f(U.uRes, canvas.width, canvas.height);
+  gl.uniform1f(U.uDpr, dpr);
+  render(true);
+}
+
+function render(force, t = performance.now()) {
+  rafId = 0;
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0.016);
+  lastT = t;
+
+  const k = reduced ? 1 : 1 - Math.pow(0.0001, dt);
+  cur.x += (target.x - cur.x) * k;
+  cur.y += (target.y - cur.y) * k;
+  tilt.cur += (tilt.tgt - tilt.cur) * (reduced ? 1 : 1 - Math.pow(0.001, dt));
+
+  if (t - lastMove > 700) energy = Math.max(0, energy - 1.6 * dt);
+
+  cam = camera(tilt.cur);
+  gl.uniform3fv(U.uEye, cam.eye);
+  gl.uniform3fv(U.uFwd, cam.fwd);
+  gl.uniform3fv(U.uRight, cam.right);
+  gl.uniform3fv(U.uUp, cam.up);
+  gl.uniform2f(U.uHalf, W / 2, H / 2);
+  gl.uniform2f(U.uTan, TAN * (W / H), TAN);
+  gl.uniform1f(U.uOrthoK, cam.orthoK);
+  gl.uniform2f(U.uRawW, raw.x, raw.y);
+  gl.uniform2f(U.uCrossW, cur.x, cur.y);
+  gl.uniform1f(U.uEnergy, energy);
+  gl.uniform1f(U.uPulse, reduced ? 0.85 : 0.7 + 0.3 * Math.sin(t / 1000 * 2.6));
+
+  if (meas.on) {
+    const lo = [Math.min(meas.ax, cur.x), Math.min(meas.ay, cur.y)];
+    const hi = [Math.max(meas.ax, cur.x), Math.max(meas.ay, cur.y)];
+    gl.uniform4f(U.uMeas, lo[0], lo[1], hi[0], hi[1]);
+    gl.uniform1f(U.uMeasA, 1);
+  } else gl.uniform1f(U.uMeasA, 0);
+
+  for (let i = 0; i < rects.length; i++) {
+    boxLo[i * 2] = rects[i].lo[0]; boxLo[i * 2 + 1] = rects[i].lo[1];
+    boxHi[i * 2] = rects[i].hi[0]; boxHi[i * 2 + 1] = rects[i].hi[1];
+    boxH[i] = rects[i].h * Math.min(1, tilt.cur * 3.2); // volumes rise with the tilt
+  }
+  gl.uniform2fv(U.uBoxLo, boxLo);
+  gl.uniform2fv(U.uBoxHi, boxHi);
+  gl.uniform1fv(U.uBoxH, boxH);
+  gl.uniform1i(U.uNBox, rects.length);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // DOM readout rides the crosshair (world → css)
+  const cx = cur.x, cy = H - cur.y;
+  const m = meas.on;
+  readout.textContent = m
+    ? `w: ${Math.abs(Math.round(target.x - meas.ax))} · h: ${Math.abs(Math.round(target.y - meas.ay))}`
+    : `x: ${Math.round(target.x)} · y: ${Math.round(target.y)}`;
+  readout.style.transform = `translate(${Math.round(cx) + 14}px, ${Math.round(cy) + 16}px)`;
+  readout.style.opacity = (tilt.cur < 0.2 && (m || energy > 0.03)) ? String(Math.min(1, energy * 1.6)) : '0';
+
+  const settled = Math.abs(cur.x - target.x) < 0.05 && Math.abs(cur.y - target.y) < 0.05;
+  const tilting = Math.abs(tilt.cur - tilt.tgt) > 0.0015;
+  if (!force && (energy > 0.004 || !settled || tilting || meas.on)) schedule();
+  else running = false;
+}
+
+const frame = t => render(false, t);
+function schedule() { running = true; if (!rafId) rafId = requestAnimationFrame(frame); }
+function kick() { if (!running) { lastT = performance.now(); schedule(); } }
+
+/* ---------- input ---------- */
+
+addEventListener('pointermove', e => {
+  const w = pointerToWorld(e.clientX, e.clientY);
+  if (!w) return;
+  raw.x = w.x; raw.y = w.y;
+  target.x = snap(w.x); target.y = snap(w.y);
+  if (cur.x < -1e3) { cur.x = target.x; cur.y = target.y; }
+  lastMove = performance.now();
+  energy = 1;
+  kick();
+}, { passive: true });
+
+addEventListener('pointerdown', e => {
+  if (e.target.closest && e.target.closest('a, button, select, input')) return;
+  if (tilt.cur > 0.2) return;                 // drafting happens on the flat sheet
+  const w = pointerToWorld(e.clientX, e.clientY);
+  if (!w) return;
+  if (!meas.on) {
+    meas.on = true;
+    meas.ax = snap(w.x); meas.ay = snap(w.y);
+  } else {
+    meas.on = false;
+    const hx = snap(w.x), hy = snap(w.y);
+    const lo = [Math.min(meas.ax, hx), Math.min(meas.ay, hy)];
+    const hi = [Math.max(meas.ax, hx), Math.max(meas.ay, hy)];
+    const bw = hi[0] - lo[0], bh = hi[1] - lo[1];
+    if (bw >= GRID && bh >= GRID) {
+      rects.push({ lo, hi, h: Math.max(24, Math.min(280, Math.min(bw, bh))) });
+      if (rects.length > MAXB) rects.shift();
+    }
+  }
+  kick();
+}, { passive: true });
+
+addEventListener('wheel', e => {
+  tilt.tgt = Math.max(0, Math.min(1, tilt.tgt + e.deltaY * 0.0011));
+  kick();
+}, { passive: true });
+
+addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (meas.on) meas.on = false;
+  else tilt.tgt = 0;
+  kick();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { if (rafId) cancelAnimationFrame(rafId); rafId = 0; running = false; }
+  else render(true);
+});
+addEventListener('resize', resize);
+resize();
+</script>
+</body>
+</html>
