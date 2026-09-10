@@ -174,17 +174,20 @@ void main() {
     float edgeIn = max(min(min(p.x - lo.x, hi.x - p.x), min(p.y - lo.y, hi.y - p.y)), 0.0);
     float glow = exp(-edgeIn / 16.0) * glass;
 
-    // drafted footprints stay inked on the sheet
+    // drafted footprints stay inked on the sheet — but the ink of an
+    // elevated block leaves the ground as the sheet tilts
     float fpB = 0.0, fpF = 0.0;
     for (int i = 0; i < ${MAXB}; i++) {
       if (i >= uNBox) break;
+      float ink = uBoxB[i] < 0.5 ? 1.0 : uOrthoK;
+      if (ink < 0.01) continue;
       vec2 l2 = uBoxLo[i], h2 = uBoxHi[i];
       float iX = step(l2.x, p.x) * step(p.x, h2.x);
       float iY = step(l2.y, p.y) * step(p.y, h2.y);
       float ex2 = min(abs(p.x - l2.x), abs(p.x - h2.x));
       float ey2 = min(abs(p.y - l2.y), abs(p.y - h2.y));
-      fpB = max(fpB, max(lineAA(ex2, fwXY.x) * iY, lineAA(ey2, fwXY.y) * iX));
-      fpF = max(fpF, iX * iY);
+      fpB = max(fpB, max(lineAA(ex2, fwXY.x) * iY, lineAA(ey2, fwXY.y) * iX) * ink);
+      fpF = max(fpF, iX * iY * ink);
     }
 
     col += (uLine * (minor + major) * (1.0 - inner * uEnergy)) * fade;
@@ -273,6 +276,7 @@ const target = { x: -1e4, y: -1e4 };
 const cur = { x: -1e4, y: -1e4 };
 const meas = { on: false, ax: 0, ay: 0 };
 const tilt = { cur: 0, tgt: 0 };
+const zoom = { cur: 1, tgt: 1 };   // pinch: pull back as the block grows
 const rects = [];                     // {lo:[x,y], hi:[x,y], h}
 
 const boxLo = new Float32Array(MAXB * 2);
@@ -285,12 +289,14 @@ const boxB = new Float32Array(MAXB);
 function computeBases() {
   for (let i = 0; i < rects.length; i++) {
     const r = rects[i];
+    const area = (r.hi[0] - r.lo[0]) * (r.hi[1] - r.lo[1]);
     let b = 0;
     for (let j = 0; j < i; j++) {
       const s = rects[j];
-      if (r.lo[0] < s.hi[0] - 4 && r.hi[0] > s.lo[0] + 4 &&
-          r.lo[1] < s.hi[1] - 4 && r.hi[1] > s.lo[1] + 4)
-        b = Math.max(b, s.base + s.h);
+      const ov = Math.max(0, Math.min(r.hi[0], s.hi[0]) - Math.max(r.lo[0], s.lo[0]))
+               * Math.max(0, Math.min(r.hi[1], s.hi[1]) - Math.max(r.lo[1], s.lo[1]));
+      // only rects mostly on a support stack; glancing overlaps interpenetrate
+      if (ov > 0.55 * area) b = Math.max(b, s.base + s.h);
     }
     r.base = b;
   }
@@ -326,7 +332,8 @@ function camera(T) {
   const el = (90 - 55 * ease) * Math.PI / 180;
   const az = (-25 * ease) * Math.PI / 180;
   const P = [W / 2, H / 2, 0];
-  const dist = H / (2 * TAN);
+  const Z = zoom.cur;
+  const dist = H / (2 * TAN * Z);
   const eye = [
     P[0] + dist * Math.sin(az) * Math.cos(el),
     P[1] - dist * Math.cos(az) * Math.cos(el),
@@ -339,7 +346,9 @@ function camera(T) {
   else right = norm([fwd[1] * 1 - fwd[2] * 0, fwd[2] * 0 - fwd[0] * 1, 0]); // fwd × (0,0,1)
   const up = [right[1] * fwd[2] - right[2] * fwd[1], right[2] * fwd[0] - right[0] * fwd[2], right[0] * fwd[1] - right[1] * fwd[0]];
   const orthoK = 1 - Math.min(1, Math.max(0, ease / 0.35));
-  return { eye, fwd, right, up, orthoK };
+  return { eye, fwd, right, up, orthoK,
+           halfW: W / (2 * Z), halfH: H / (2 * Z),
+           tanW: TAN * (W / H), tanH: TAN };
 }
 
 let cam = null;
@@ -347,8 +356,8 @@ function pointerRay(cssX, cssY) {
   const c = cam || camera(tilt.cur);
   const ndcX = (cssX / W) * 2 - 1, ndcY = ((H - cssY) / H) * 2 - 1;
   const mix3 = (a, b, k) => a.map((v, i) => v + (b[i] - v) * k);
-  const rdP = [0, 1, 2].map(i => c.fwd[i] + ndcX * TAN * (W / H) * c.right[i] + ndcY * TAN * c.up[i]);
-  const roO = [0, 1, 2].map(i => c.eye[i] + ndcX * (W / 2) * c.right[i] + ndcY * (H / 2) * c.up[i]);
+  const rdP = [0, 1, 2].map(i => c.fwd[i] + ndcX * c.tanW * c.right[i] + ndcY * c.tanH * c.up[i]);
+  const roO = [0, 1, 2].map(i => c.eye[i] + ndcX * c.halfW * c.right[i] + ndcY * c.halfH * c.up[i]);
   const ro = mix3(c.eye, roO, c.orthoK);
   let rd = mix3(rdP, c.fwd, c.orthoK);
   const l = Math.hypot(...rd); rd = rd.map(v => v / l);
@@ -367,8 +376,8 @@ function projectWorld(x, y, z) {
   const py = v[0] * c.up[0] + v[1] * c.up[1] + v[2] * c.up[2];
   const pz = v[0] * c.fwd[0] + v[1] * c.fwd[1] + v[2] * c.fwd[2];
   if (pz <= 1e-4 && c.orthoK < 0.5) return null;
-  const nx = px / (Math.max(pz, 1e-4) * TAN * (W / H)), ny = py / (Math.max(pz, 1e-4) * TAN);
-  const ox = px / (W / 2), oy = py / (H / 2);
+  const nx = px / (Math.max(pz, 1e-4) * c.tanW), ny = py / (Math.max(pz, 1e-4) * c.tanH);
+  const ox = px / c.halfW, oy = py / c.halfH;
   const fx = nx + (ox - nx) * c.orthoK, fy = ny + (oy - ny) * c.orthoK;
   return [(fx + 1) / 2 * W, H - (fy + 1) / 2 * H, pz];
 }
@@ -511,6 +520,7 @@ function render(force, t = performance.now()) {
   cur.x += (target.x - cur.x) * k;
   cur.y += (target.y - cur.y) * k;
   tilt.cur += (tilt.tgt - tilt.cur) * (reduced ? 1 : 1 - Math.pow(0.001, dt));
+  zoom.cur += (zoom.tgt - zoom.cur) * (reduced ? 1 : 1 - Math.pow(0.001, dt));
 
   if (t - lastMove > 700) energy = Math.max(0, energy - 1.6 * dt);
 
@@ -519,8 +529,8 @@ function render(force, t = performance.now()) {
   gl.uniform3fv(U.uFwd, cam.fwd);
   gl.uniform3fv(U.uRight, cam.right);
   gl.uniform3fv(U.uUp, cam.up);
-  gl.uniform2f(U.uHalf, W / 2, H / 2);
-  gl.uniform2f(U.uTan, TAN * (W / H), TAN);
+  gl.uniform2f(U.uHalf, cam.halfW, cam.halfH);
+  gl.uniform2f(U.uTan, cam.tanW, cam.tanH);
   gl.uniform1f(U.uOrthoK, cam.orthoK);
   gl.uniform2f(U.uRawW, raw.x, raw.y);
   gl.uniform2f(U.uCrossW, cur.x, cur.y);
@@ -586,13 +596,14 @@ function render(force, t = performance.now()) {
   if (tilted !== hintTilted) {
     hintTilted = tilted;
     hint.innerHTML = tilted
-      ? '<em>click&ndash;click</em> drafts &nbsp;&middot;&nbsp; <em>faces</em> move &nbsp;&middot;&nbsp; <em>lines</em> resize &nbsp;&middot;&nbsp; <em>backspace</em> deletes &nbsp;&middot;&nbsp; <em>esc</em> flattens'
-      : '<em>click&ndash;click</em> to draft &nbsp;&middot;&nbsp; <em>scroll</em> to tilt the sheet &nbsp;&middot;&nbsp; <em>esc</em> flattens';
+      ? '<em>click&ndash;click</em> drafts &nbsp;&middot;&nbsp; <em>faces</em> move &nbsp;&middot;&nbsp; <em>lines</em> resize &nbsp;&middot;&nbsp; <em>pinch</em> zooms &nbsp;&middot;&nbsp; <em>backspace</em> deletes &nbsp;&middot;&nbsp; <em>esc</em> flattens'
+      : '<em>click&ndash;click</em> to draft &nbsp;&middot;&nbsp; <em>scroll</em> to tilt &nbsp;&middot;&nbsp; <em>pinch</em> to zoom &nbsp;&middot;&nbsp; <em>esc</em> flattens';
   }
 
   const settled = Math.abs(cur.x - target.x) < 0.05 && Math.abs(cur.y - target.y) < 0.05;
   const tilting = Math.abs(tilt.cur - tilt.tgt) > 0.0015;
-  if (!force && (energy > 0.004 || !settled || tilting || meas.on || growing)) schedule();
+  const zooming = Math.abs(zoom.cur - zoom.tgt) > 0.0015;
+  if (!force && (energy > 0.004 || !settled || tilting || zooming || meas.on || growing)) schedule();
   else running = false;
 }
 
@@ -675,9 +686,14 @@ addEventListener('pointerup', () => {
 }, { passive: true });
 
 addEventListener('wheel', e => {
-  tilt.tgt = Math.max(0, Math.min(1, tilt.tgt + e.deltaY * 0.0011));
+  e.preventDefault();   // keep the browser's own pinch-zoom out of it
+  if (e.ctrlKey) {      // trackpad pinch arrives as ctrl+wheel
+    zoom.tgt = Math.max(0.45, Math.min(2.4, zoom.tgt * Math.exp(-e.deltaY * 0.012)));
+  } else {
+    tilt.tgt = Math.max(0, Math.min(1, tilt.tgt + e.deltaY * 0.0011));
+  }
   kick();
-}, { passive: true });
+}, { passive: false });
 
 addEventListener('keydown', e => {
   if ((e.key === 'Backspace' || e.key === 'Delete') && tilt.cur > 0.25 && hover.box >= 0) {
@@ -689,13 +705,14 @@ addEventListener('keydown', e => {
   }
   if (e.key !== 'Escape') return;
   if (meas.on) meas.on = false;
-  else tilt.tgt = 0;
+  else if (tilt.tgt > 0.01) tilt.tgt = 0;
+  else zoom.tgt = 1;
   kick();
 });
 
 // verification hooks (harmless in normal use)
 window.__project = projectWorld;
-window.__tstate = () => ({ tilt: tilt.cur, hover: { ...hover },
+window.__tstate = () => ({ tilt: tilt.cur, zoom: zoom.cur, hover: { ...hover },
   rects: rects.map(r => ({ lo: r.lo.slice(), hi: r.hi.slice(), h: r.h, base: r.base || 0 })) });
 
 document.addEventListener('visibilitychange', () => {
