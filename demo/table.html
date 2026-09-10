@@ -89,6 +89,22 @@ uniform vec3  uBg, uLine, uAc;
 // screen-px antialiased line: d = world distance, fw = its screen footprint
 float lineAA(float d, float fw) { return 1.0 - smoothstep(0.5, 1.5, d / max(fw, 1e-6)); }
 
+// a fixed pleasant sun (normalized), high and slightly behind-left
+const vec3 SUN = vec3(-0.4006, -0.2504, 0.8814);
+
+// soft directional shadow of one volume onto a receiving point
+float boxShadow(vec3 p, vec3 blo, vec3 bhi) {
+  float t0 = (blo.z - p.z) / SUN.z, t1 = (bhi.z - p.z) / SUN.z;
+  if (t1 <= 0.001) return 1.0;      // occluder entirely below the ray
+  t0 = max(t0, 0.0);
+  float tm = (t0 + t1) * 0.5;
+  vec2 q = p.xy + SUN.xy * tm;
+  vec2 dxy = max(blo.xy - q, q - bhi.xy);
+  float d = max(dxy.x, dxy.y);      // <0: inside the shadow column
+  float w = 3.0 + tm * 0.16;        // penumbra widens with travel
+  return mix(0.45, 1.0, smoothstep(-0.25 * w, w, d));
+}
+
 // grid line mask at spacing s for world coords q (fw = per-axis footprint)
 float gridAA(vec2 q, float s, vec2 fw, out float moire) {
   vec2 g = abs(q / s - round(q / s)) * s;
@@ -190,14 +206,30 @@ void main() {
       fpF = max(fpF, iX * iY * ink);
     }
 
+    // the paper and its ink receive the light...
     col += (uLine * (minor + major) * (1.0 - inner * uEnergy)) * fade;
     col += uAc * fpF * 0.030;
     col += uAc * fpB * 0.40 * fade;
-    col += uLine * cross * (1.0 - inner);
     col += uAc * dots * fade;
     col += uLine * lift * 0.012;
     col += uAc * glass * 0.055;
     col += uAc * glow * 0.05;
+
+    // ...as soft shadows and contact occlusion from the volumes
+    float sh = 1.0, ao = 1.0;
+    for (int i = 0; i < ${MAXB}; i++) {
+      if (i >= uNBox) break;
+      if (uBoxH[i] < 0.5) continue;
+      sh = min(sh, boxShadow(p, vec3(uBoxLo[i], uBoxB[i]), vec3(uBoxHi[i], uBoxB[i] + uBoxH[i])));
+      if (uBoxB[i] < 0.5) {
+        vec2 dc2 = max(uBoxLo[i] - p.xy, p.xy - uBoxHi[i]);
+        ao *= 0.80 + 0.20 * smoothstep(0.0, 16.0, max(dc2.x, dc2.y));
+      }
+    }
+    col *= mix(1.0, sh, 0.88) * ao;
+
+    // instrument chrome stays above the light
+    col += uLine * cross * (1.0 - inner);
     col += uAc * mBorder * 0.55;
     col += uAc * ring * uPulse;
   } else {
@@ -212,10 +244,9 @@ void main() {
     else                     { q = vec2(p.x, p.z); fq = vec2(fwXY.x, fwZ); e1 = min(p.x - lo.x, hi.x - p.x); f1 = fwXY.x; e2 = min(p.z - uBoxB[bi], uBoxB[bi] + h - p.z); f2 = fwZ; }
 
     // faces keep the drafting grid, toned by orientation
-    float shade = abs(n.z) > 0.5 ? 1.0 : (abs(n.x) > 0.5 ? 0.55 : 0.75);
     float m1, m2;
-    float minor = gridAA(q, 8.0, fq, m1) * 0.050 * shade;
-    float major = gridAA(q, 64.0, fq, m2) * 0.085 * shade;
+    float minor = gridAA(q, 8.0, fq, m1) * 0.050;
+    float major = gridAA(q, 64.0, fq, m2) * 0.085;
 
     // hairline wireframe on the face boundary
     float edge = max(lineAA(e1, f1), lineAA(e2, f2));
@@ -225,9 +256,18 @@ void main() {
     float hov = (bi == uHoverBox) ? 1.0 : 0.0;
     float hovFace = (bi == uHoverBox && faceId == uHoverFace) ? 1.0 : 0.0;
 
-    col += uBg * 0.35 * shade;                 // faces lift off the ground
-    col += uLine * (minor + major) * fade;
-    col += uAc * abs(n.z) * 0.020;             // roofs catch a little accent
+    // faces take the sun: lambert tone + soft shadows from the other volumes
+    float lam = 0.35 + 0.65 * max(dot(n, SUN), 0.0);
+    float sh = 1.0;
+    for (int i = 0; i < ${MAXB}; i++) {
+      if (i >= uNBox) break;
+      if (i == bi || uBoxH[i] < 0.5) continue;
+      sh = min(sh, boxShadow(p + n * 0.5, vec3(uBoxLo[i], uBoxB[i]), vec3(uBoxHi[i], uBoxB[i] + uBoxH[i])));
+    }
+    vec3 fcol = uBg * 0.35 + uLine * (minor + major) * fade + uAc * abs(n.z) * 0.020;
+    col += fcol * lam * mix(1.0, sh, 0.85);
+
+    // drafting ink stays crisp above the light
     col += uAc * hovFace * 0.045;
     col += uAc * edge * (0.72 + 0.28 * hov) * fade;
   }
@@ -277,6 +317,7 @@ const cur = { x: -1e4, y: -1e4 };
 const meas = { on: false, ax: 0, ay: 0 };
 const tilt = { cur: 0, tgt: 0 };
 const zoom = { cur: 1, tgt: 1 };   // pinch: pull back as the block grows
+const orbit = { cur: 0, tgt: 0 };  // sideways scroll: walk around the model
 const rects = [];                     // {lo:[x,y], hi:[x,y], h}
 
 const boxLo = new Float32Array(MAXB * 2);
@@ -330,7 +371,7 @@ function place(el, text, s, ox, oy) {
 function camera(T) {
   const ease = T * T * (3 - 2 * T);
   const el = (90 - 55 * ease) * Math.PI / 180;
-  const az = (-25 * ease) * Math.PI / 180;
+  const az = ease * (-25 * Math.PI / 180 + orbit.cur);
   const P = [W / 2, H / 2, 0];
   const Z = zoom.cur;
   const dist = H / (2 * TAN * Z);
@@ -521,6 +562,7 @@ function render(force, t = performance.now()) {
   cur.y += (target.y - cur.y) * k;
   tilt.cur += (tilt.tgt - tilt.cur) * (reduced ? 1 : 1 - Math.pow(0.001, dt));
   zoom.cur += (zoom.tgt - zoom.cur) * (reduced ? 1 : 1 - Math.pow(0.001, dt));
+  orbit.cur += (orbit.tgt - orbit.cur) * (reduced ? 1 : 1 - Math.pow(0.001, dt));
 
   if (t - lastMove > 700) energy = Math.max(0, energy - 1.6 * dt);
 
@@ -596,14 +638,15 @@ function render(force, t = performance.now()) {
   if (tilted !== hintTilted) {
     hintTilted = tilted;
     hint.innerHTML = tilted
-      ? '<em>click&ndash;click</em> drafts &nbsp;&middot;&nbsp; <em>faces</em> move &nbsp;&middot;&nbsp; <em>lines</em> resize &nbsp;&middot;&nbsp; <em>pinch</em> zooms &nbsp;&middot;&nbsp; <em>backspace</em> deletes &nbsp;&middot;&nbsp; <em>esc</em> flattens'
+      ? '<em>click&ndash;click</em> drafts &nbsp;&middot;&nbsp; <em>faces</em> move &nbsp;&middot;&nbsp; <em>lines</em> resize &nbsp;&middot;&nbsp; <em>swipe</em> orbits &nbsp;&middot;&nbsp; <em>pinch</em> zooms &nbsp;&middot;&nbsp; <em>backspace</em> deletes &nbsp;&middot;&nbsp; <em>esc</em> flattens'
       : '<em>click&ndash;click</em> to draft &nbsp;&middot;&nbsp; <em>scroll</em> to tilt &nbsp;&middot;&nbsp; <em>pinch</em> to zoom &nbsp;&middot;&nbsp; <em>esc</em> flattens';
   }
 
   const settled = Math.abs(cur.x - target.x) < 0.05 && Math.abs(cur.y - target.y) < 0.05;
   const tilting = Math.abs(tilt.cur - tilt.tgt) > 0.0015;
   const zooming = Math.abs(zoom.cur - zoom.tgt) > 0.0015;
-  if (!force && (energy > 0.004 || !settled || tilting || zooming || meas.on || growing)) schedule();
+  const orbiting = Math.abs(orbit.cur - orbit.tgt) > 0.0015;
+  if (!force && (energy > 0.004 || !settled || tilting || zooming || orbiting || meas.on || growing)) schedule();
   else running = false;
 }
 
@@ -689,6 +732,8 @@ addEventListener('wheel', e => {
   e.preventDefault();   // keep the browser's own pinch-zoom out of it
   if (e.ctrlKey) {      // trackpad pinch arrives as ctrl+wheel
     zoom.tgt = Math.max(0.45, Math.min(2.4, zoom.tgt * Math.exp(-e.deltaY * 0.012)));
+  } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+    orbit.tgt += e.deltaX * 0.0035;   // sideways: walk around the model
   } else {
     tilt.tgt = Math.max(0, Math.min(1, tilt.tgt + e.deltaY * 0.0011));
   }
@@ -712,7 +757,7 @@ addEventListener('keydown', e => {
 
 // verification hooks (harmless in normal use)
 window.__project = projectWorld;
-window.__tstate = () => ({ tilt: tilt.cur, zoom: zoom.cur, hover: { ...hover },
+window.__tstate = () => ({ tilt: tilt.cur, zoom: zoom.cur, orbit: orbit.cur, hover: { ...hover },
   rects: rects.map(r => ({ lo: r.lo.slice(), hi: r.hi.slice(), h: r.h, base: r.base || 0 })) });
 
 document.addEventListener('visibilitychange', () => {
