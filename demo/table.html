@@ -80,6 +80,7 @@ uniform float uMeasA;
 uniform vec2  uBoxLo[${MAXB}];
 uniform vec2  uBoxHi[${MAXB}];
 uniform float uBoxH[${MAXB}];
+uniform float uBoxB[${MAXB}];  // base elevation: stacked blocks rest on what's below
 uniform int   uNBox;
 uniform int   uHoverBox;   // -1 none
 uniform int   uHoverFace;  // 1 top, 2 x-, 3 x+, 4 y-, 5 y+
@@ -113,7 +114,7 @@ void main() {
   for (int i = 0; i < ${MAXB}; i++) {
     if (i >= uNBox) break;
     if (uBoxH[i] < 0.5) continue;   // flat plans render as footprints on the sheet
-    vec3 blo = vec3(uBoxLo[i], 0.0), bhi = vec3(uBoxHi[i], uBoxH[i]);
+    vec3 blo = vec3(uBoxLo[i], uBoxB[i]), bhi = vec3(uBoxHi[i], uBoxB[i] + uBoxH[i]);
     vec3 inv = 1.0 / rd;
     vec3 t0 = (blo - ro) * inv, t1 = (bhi - ro) * inv;
     vec3 tmin = min(t0, t1), tmax = max(t0, t1);
@@ -204,8 +205,8 @@ void main() {
     // face-local 2D coords + their screen footprints
     vec2 q, fq; float e1, e2, f1, f2;
     if (abs(n.z) > 0.5)      { q = p.xy; fq = fwXY; e1 = min(p.x - lo.x, hi.x - p.x); f1 = fwXY.x; e2 = min(p.y - lo.y, hi.y - p.y); f2 = fwXY.y; }
-    else if (abs(n.x) > 0.5) { q = vec2(p.y, p.z); fq = vec2(fwXY.y, fwZ); e1 = min(p.y - lo.y, hi.y - p.y); f1 = fwXY.y; e2 = min(p.z, h - p.z); f2 = fwZ; }
-    else                     { q = vec2(p.x, p.z); fq = vec2(fwXY.x, fwZ); e1 = min(p.x - lo.x, hi.x - p.x); f1 = fwXY.x; e2 = min(p.z, h - p.z); f2 = fwZ; }
+    else if (abs(n.x) > 0.5) { q = vec2(p.y, p.z); fq = vec2(fwXY.y, fwZ); e1 = min(p.y - lo.y, hi.y - p.y); f1 = fwXY.y; e2 = min(p.z - uBoxB[bi], uBoxB[bi] + h - p.z); f2 = fwZ; }
+    else                     { q = vec2(p.x, p.z); fq = vec2(fwXY.x, fwZ); e1 = min(p.x - lo.x, hi.x - p.x); f1 = fwXY.x; e2 = min(p.z - uBoxB[bi], uBoxB[bi] + h - p.z); f2 = fwZ; }
 
     // faces keep the drafting grid, toned by orientation
     float shade = abs(n.z) > 0.5 ? 1.0 : (abs(n.x) > 0.5 ? 0.55 : 0.75);
@@ -252,7 +253,7 @@ gl.useProgram(prog);
 
 const U = {};
 for (const n of ['uRes','uDpr','uEye','uFwd','uRight','uUp','uHalf','uTan','uOrthoK','uRawW','uCrossW',
-                 'uEnergy','uPulse','uMeas','uMeasA','uBoxLo','uBoxHi','uBoxH','uNBox','uHoverBox','uHoverFace','uBg','uLine','uAc'])
+                 'uEnergy','uPulse','uMeas','uMeasA','uBoxLo','uBoxHi','uBoxH','uBoxB','uNBox','uHoverBox','uHoverFace','uBg','uLine','uAc'])
   U[n] = gl.getUniformLocation(prog, n);
 
 const hex01 = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
@@ -277,6 +278,33 @@ const rects = [];                     // {lo:[x,y], hi:[x,y], h}
 const boxLo = new Float32Array(MAXB * 2);
 const boxHi = new Float32Array(MAXB * 2);
 const boxH = new Float32Array(MAXB);
+const boxB = new Float32Array(MAXB);
+
+// drafting order is build order: a rect resting on earlier footprints
+// stacks on top of them — and rides along when what's below changes
+function computeBases() {
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i];
+    let b = 0;
+    for (let j = 0; j < i; j++) {
+      const s = rects[j];
+      if (r.lo[0] < s.hi[0] - 4 && r.hi[0] > s.lo[0] + 4 &&
+          r.lo[1] < s.hi[1] - 4 && r.hi[1] > s.lo[1] + 4)
+        b = Math.max(b, s.base + s.h);
+    }
+    r.base = b;
+  }
+}
+
+function commitRect(hx, hy) {
+  const lo = [Math.min(meas.ax, hx), Math.min(meas.ay, hy)];
+  const hi = [Math.max(meas.ax, hx), Math.max(meas.ay, hy)];
+  const bw = hi[0] - lo[0], bh = hi[1] - lo[1];
+  if (bw >= GRID && bh >= GRID) {
+    rects.push({ lo, hi, h: Math.max(24, Math.min(280, Math.min(bw, bh))), base: 0, born: performance.now() });
+    if (rects.length > MAXB) rects.shift();
+  }
+}
 
 const readout = document.getElementById('readout');
 const dw = document.getElementById('dw'), dh = document.getElementById('dh'), dz = document.getElementById('dz');
@@ -347,10 +375,14 @@ function projectWorld(x, y, z) {
 
 /* ---------- picking + face dragging ---------- */
 
-const hover = { box: -1, face: 0 };
-const drag = { on: false, box: -1, face: 0, unit: [0, 0], perUnit: 1, start: 0, lo0: null, hi0: null, sx: 0, sy: 0 };
+const hover = { box: -1, face: 0, mode: '', bound: '' };
+const drag = { on: false, box: -1, mode: '', bound: '', unit: [0, 0], perUnit: 1,
+               start: 0, lo0: null, hi0: null, sx: 0, sy: 0, offX: 0, offY: 0, szX: 0, szY: 0 };
 const riseK = () => Math.min(1, tilt.cur * 3.2);
+const EDGE_PX = 9;   // within this many screen px of a line = resize, else = move
 
+// design-tool semantics: the middle of a face is a hand (move the shape),
+// a line is a double chevron (resize along that line's axis)
 function pick(cssX, cssY) {
   const { ro, rd } = pointerRay(cssX, cssY);
   let best = 1e9, box = -1, face = 0;
@@ -358,7 +390,8 @@ function pick(cssX, cssY) {
   for (let i = 0; i < rects.length; i++) {
     const eh = rects[i].h * rk;
     if (eh < 0.5) continue;
-    const lo = [rects[i].lo[0], rects[i].lo[1], 0], hi = [rects[i].hi[0], rects[i].hi[1], eh];
+    const eb = rects[i].base * rk;
+    const lo = [rects[i].lo[0], rects[i].lo[1], eb], hi = [rects[i].hi[0], rects[i].hi[1], eb + eh];
     let tn = -1e9, tf = 1e9, ax = -1, ok = true;
     for (let a = 0; a < 3; a++) {
       const d = Math.abs(rd[a]) < 1e-9 ? (rd[a] < 0 ? -1e-9 : 1e-9) : rd[a];
@@ -372,43 +405,88 @@ function pick(cssX, cssY) {
     best = tn; box = i;
     face = ax === 2 ? 1 : ax === 0 ? (rd[0] > 0 ? 2 : 3) : (rd[1] > 0 ? 4 : 5);
   }
-  return { box, face };
+  if (box < 0) return { box: -1, face: 0, mode: '', bound: '' };
+
+  // classify: near a boundary line of the hit face → resize that bound
+  const r = rects[box];
+  const eh = r.h * rk, eb = r.base * rk;
+  const p = [ro[0] + rd[0] * best, ro[1] + rd[1] * best, ro[2] + rd[2] * best];
+  const pxPer = axis => {
+    const s0 = projectWorld(p[0], p[1], p[2]);
+    const s1 = projectWorld(p[0] + axis[0], p[1] + axis[1], p[2] + axis[2]);
+    return (s0 && s1) ? Math.hypot(s1[0] - s0[0], s1[1] - s0[1]) : 0;
+  };
+  const X = [1, 0, 0], Y = [0, 1, 0], Z = [0, 0, 1];
+  const cand = [];   // [screen px to the line, bound]
+  if (face === 1) {
+    const kx = pxPer(X), ky = pxPer(Y);
+    cand.push([(p[0] - r.lo[0]) * kx, 'xlo'], [(r.hi[0] - p[0]) * kx, 'xhi']);
+    cand.push([(p[1] - r.lo[1]) * ky, 'ylo'], [(r.hi[1] - p[1]) * ky, 'yhi']);
+  } else if (face === 2 || face === 3) {
+    const ky = pxPer(Y), kz = pxPer(Z);
+    cand.push([(p[1] - r.lo[1]) * ky, 'ylo'], [(r.hi[1] - p[1]) * ky, 'yhi']);
+    cand.push([((eb + eh) - p[2]) * kz, 'z'], [(p[2] - eb) * kz, face === 2 ? 'xlo' : 'xhi']);
+  } else {
+    const kx = pxPer(X), kz = pxPer(Z);
+    cand.push([(p[0] - r.lo[0]) * kx, 'xlo'], [(r.hi[0] - p[0]) * kx, 'xhi']);
+    cand.push([((eb + eh) - p[2]) * kz, 'z'], [(p[2] - eb) * kz, face === 4 ? 'ylo' : 'yhi']);
+  }
+  let bd = '', bdist = 1e9;
+  for (const [d, b] of cand) if (d < bdist) { bdist = d; bd = b; }
+  if (bdist < EDGE_PX) return { box, face, mode: 'resize', bound: bd, p };
+  return { box, face, mode: 'move', bound: '', p };
 }
 
-function beginDrag(bi, face, sx, sy) {
-  const r = rects[bi];
-  const eh = r.h * riseK();
-  const c = [(r.lo[0] + r.hi[0]) / 2, (r.lo[1] + r.hi[1]) / 2];
-  let p0, axis;
-  if (face === 1)      { p0 = [c[0], c[1], eh]; axis = [0, 0, 1]; }
-  else if (face === 2) { p0 = [r.lo[0], c[1], eh / 2]; axis = [-1, 0, 0]; }
-  else if (face === 3) { p0 = [r.hi[0], c[1], eh / 2]; axis = [1, 0, 0]; }
-  else if (face === 4) { p0 = [c[0], r.lo[1], eh / 2]; axis = [0, -1, 0]; }
-  else                 { p0 = [c[0], r.hi[1], eh / 2]; axis = [0, 1, 0]; }
-  const s0 = projectWorld(p0[0], p0[1], p0[2]);
-  const s1 = projectWorld(p0[0] + axis[0] * 20, p0[1] + axis[1] * 20, p0[2] + axis[2] * 20);
-  if (!s0 || !s1) return;
+// screen direction of a world axis at point p — for cursor + drag calibration
+function axisOnScreen(p, axis) {
+  const s0 = projectWorld(p[0], p[1], p[2]);
+  const s1 = projectWorld(p[0] + axis[0] * 20, p[1] + axis[1] * 20, p[2] + axis[2] * 20);
+  if (!s0 || !s1) return null;
   const dx = s1[0] - s0[0], dy = s1[1] - s0[1];
   const len = Math.hypot(dx, dy);
-  if (len < 1e-4) return;
-  drag.on = true; drag.box = bi; drag.face = face;
-  drag.unit = [dx / len, dy / len]; drag.perUnit = len / 20;
+  return len < 1e-4 ? null : { unit: [dx / len, dy / len], perUnit: len / 20 };
+}
+
+const boundAxis = b => b === 'z' ? [0, 0, 1] : (b[0] === 'x' ? [1, 0, 0] : [0, 1, 0]);
+const resizeCursor = a => !a ? '' : (Math.abs(a.unit[0]) >= Math.abs(a.unit[1]) ? 'ew-resize' : 'ns-resize');
+
+function beginDrag(pk, sx, sy) {
+  const r = rects[pk.box];
+  drag.box = pk.box; drag.mode = pk.mode; drag.bound = pk.bound;
   drag.sx = sx; drag.sy = sy;
-  drag.start = r.h;
-  drag.lo0 = r.lo.slice(); drag.hi0 = r.hi.slice();
-  canvas.style.cursor = face === 1 ? 'ns-resize' : 'grabbing';
+  drag.lo0 = r.lo.slice(); drag.hi0 = r.hi.slice(); drag.start = r.h;
+  if (pk.mode === 'resize') {
+    const a = axisOnScreen(pk.p, boundAxis(pk.bound));
+    if (!a) return;
+    drag.unit = a.unit; drag.perUnit = a.perUnit;
+    canvas.style.cursor = resizeCursor(a);
+  } else {
+    const g = pointerToWorld(sx, sy);
+    if (!g) return;
+    drag.offX = g.x - r.lo[0]; drag.offY = g.y - r.lo[1];
+    drag.szX = r.hi[0] - r.lo[0]; drag.szY = r.hi[1] - r.lo[1];
+    canvas.style.cursor = 'grabbing';
+  }
+  drag.on = true;
 }
 
 function applyDrag(cx, cy) {
   const r = rects[drag.box];
   if (!r) { drag.on = false; return; }
+  if (drag.mode === 'move') {
+    const g = pointerToWorld(cx, cy);
+    if (!g) return;
+    r.lo[0] = snap(g.x - drag.offX); r.lo[1] = snap(g.y - drag.offY);
+    r.hi[0] = r.lo[0] + drag.szX;   r.hi[1] = r.lo[1] + drag.szY;
+    return;
+  }
   const d = ((cx - drag.sx) * drag.unit[0] + (cy - drag.sy) * drag.unit[1]) / drag.perUnit;
   const q = Math.round(d / GRID) * GRID;
-  if (drag.face === 1)      r.h = Math.max(GRID, Math.min(640, drag.start + q));
-  else if (drag.face === 2) r.lo[0] = Math.min(drag.lo0[0] - q, r.hi[0] - GRID);
-  else if (drag.face === 3) r.hi[0] = Math.max(drag.hi0[0] + q, r.lo[0] + GRID);
-  else if (drag.face === 4) r.lo[1] = Math.min(drag.lo0[1] - q, r.hi[1] - GRID);
-  else                      r.hi[1] = Math.max(drag.hi0[1] + q, r.lo[1] + GRID);
+  if (drag.bound === 'z')        r.h = Math.max(GRID, Math.min(640, drag.start + q));
+  else if (drag.bound === 'xlo') r.lo[0] = Math.min(drag.lo0[0] + q, r.hi[0] - GRID);
+  else if (drag.bound === 'xhi') r.hi[0] = Math.max(drag.hi0[0] + q, r.lo[0] + GRID);
+  else if (drag.bound === 'ylo') r.lo[1] = Math.min(drag.lo0[1] + q, r.hi[1] - GRID);
+  else if (drag.bound === 'yhi') r.hi[1] = Math.max(drag.hi0[1] + q, r.lo[1] + GRID);
 }
 
 /* ---------- frame loop (render-on-demand) ---------- */
@@ -456,37 +534,49 @@ function render(force, t = performance.now()) {
     gl.uniform1f(U.uMeasA, 1);
   } else gl.uniform1f(U.uMeasA, 0);
 
+  computeBases();
+  const rk = riseK();
+  let growing = false;
   for (let i = 0; i < rects.length; i++) {
-    boxLo[i * 2] = rects[i].lo[0]; boxLo[i * 2 + 1] = rects[i].lo[1];
-    boxHi[i * 2] = rects[i].hi[0]; boxHi[i * 2 + 1] = rects[i].hi[1];
-    boxH[i] = rects[i].h * Math.min(1, tilt.cur * 3.2); // volumes rise with the tilt
+    const r = rects[i];
+    let be = 1;
+    if (r.born) {
+      const g = (t - r.born) / 350;
+      if (g < 1) { be = g * g * (3 - 2 * g); growing = true; } else r.born = 0;
+    }
+    boxLo[i * 2] = r.lo[0]; boxLo[i * 2 + 1] = r.lo[1];
+    boxHi[i * 2] = r.hi[0]; boxHi[i * 2 + 1] = r.hi[1];
+    boxB[i] = r.base * rk;                    // stacked blocks ride their support
+    boxH[i] = r.h * rk * be;                  // volumes rise with the tilt (and on birth)
   }
   gl.uniform2fv(U.uBoxLo, boxLo);
   gl.uniform2fv(U.uBoxHi, boxHi);
   gl.uniform1fv(U.uBoxH, boxH);
+  gl.uniform1fv(U.uBoxB, boxB);
   gl.uniform1i(U.uNBox, rects.length);
   gl.uniform1i(U.uHoverBox, tilt.cur > 0.25 ? hover.box : -1);
   gl.uniform1i(U.uHoverFace, hover.face);
 
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-  // DOM readout rides the crosshair (world → css)
-  const cx = cur.x, cy = H - cur.y;
+  // DOM readout rides the crosshair (world → screen, any tilt)
   const m = meas.on;
+  const rs = projectWorld(cur.x, cur.y, 0);
   readout.textContent = m
     ? `w: ${Math.abs(Math.round(target.x - meas.ax))} · h: ${Math.abs(Math.round(target.y - meas.ay))}`
     : `x: ${Math.round(target.x)} · y: ${Math.round(target.y)}`;
-  readout.style.transform = `translate(${Math.round(cx) + 14}px, ${Math.round(cy) + 16}px)`;
-  readout.style.opacity = (tilt.cur < 0.2 && (m || energy > 0.03)) ? String(Math.min(1, energy * 1.6)) : '0';
+  if (rs) readout.style.transform = `translate(${Math.round(rs[0]) + 14}px, ${Math.round(rs[1]) + 16}px)`;
+  readout.style.opacity = m ? '1'
+    : (tilt.cur < 0.2 && energy > 0.03) ? String(Math.min(1, energy * 1.6)) : '0';
 
   // dimension labels on the hovered volume
   const hb = (tilt.cur > 0.25 && hover.box >= 0) ? rects[hover.box] : null;
   if (hb) {
-    const eh = hb.h * riseK();
+    const eh = hb.h * riseK(), eb = hb.base * riseK();
     const cxm = (hb.lo[0] + hb.hi[0]) / 2, cym = (hb.lo[1] + hb.hi[1]) / 2;
-    place(dw, `w: ${Math.round(hb.hi[0] - hb.lo[0])}`, projectWorld(cxm, hb.lo[1], 0), -18, 14);
-    place(dh, `h: ${Math.round(hb.hi[1] - hb.lo[1])}`, projectWorld(hb.hi[0], cym, 0), 12, 0);
-    place(dz, `z: ${Math.round(hb.h)}`, projectWorld(hb.lo[0], hb.lo[1], eh / 2), -56, -6);
+    place(dw, `w: ${Math.round(hb.hi[0] - hb.lo[0])}`, projectWorld(cxm, hb.lo[1], eb), -18, 14);
+    place(dh, `h: ${Math.round(hb.hi[1] - hb.lo[1])}`, projectWorld(hb.hi[0], cym, eb), 12, 0);
+    place(dz, `z: ${Math.round(hb.h)}`, projectWorld(hb.lo[0], hb.lo[1], eb + eh / 2), -56, -6);
   } else {
     dw.style.opacity = dh.style.opacity = dz.style.opacity = '0';
   }
@@ -496,13 +586,13 @@ function render(force, t = performance.now()) {
   if (tilted !== hintTilted) {
     hintTilted = tilted;
     hint.innerHTML = tilted
-      ? '<em>drag a roof</em> to raise it &nbsp;&middot;&nbsp; <em>drag a side</em> to reshape &nbsp;&middot;&nbsp; <em>backspace</em> deletes &nbsp;&middot;&nbsp; <em>esc</em> flattens'
+      ? '<em>click&ndash;click</em> drafts &nbsp;&middot;&nbsp; <em>faces</em> move &nbsp;&middot;&nbsp; <em>lines</em> resize &nbsp;&middot;&nbsp; <em>backspace</em> deletes &nbsp;&middot;&nbsp; <em>esc</em> flattens'
       : '<em>click&ndash;click</em> to draft &nbsp;&middot;&nbsp; <em>scroll</em> to tilt the sheet &nbsp;&middot;&nbsp; <em>esc</em> flattens';
   }
 
   const settled = Math.abs(cur.x - target.x) < 0.05 && Math.abs(cur.y - target.y) < 0.05;
   const tilting = Math.abs(tilt.cur - tilt.tgt) > 0.0015;
-  if (!force && (energy > 0.004 || !settled || tilting || meas.on)) schedule();
+  if (!force && (energy > 0.004 || !settled || tilting || meas.on || growing)) schedule();
   else running = false;
 }
 
@@ -527,11 +617,14 @@ addEventListener('pointermove', e => {
     if (cur.x < -1e3) { cur.x = target.x; cur.y = target.y; }
   }
   if (tilt.cur > 0.25) {
-    const h = pick(e.clientX, e.clientY);
-    hover.box = h.box; hover.face = h.face;
-    canvas.style.cursor = h.box < 0 ? '' : (h.face === 1 ? 'ns-resize' : 'grab');
+    const pk = pick(e.clientX, e.clientY);
+    hover.box = pk.box; hover.mode = pk.mode; hover.bound = pk.bound;
+    hover.face = pk.mode === 'move' ? pk.face : 0;   // fill the face only for the hand
+    canvas.style.cursor = pk.box < 0 ? ''
+      : pk.mode === 'move' ? 'grab'
+      : resizeCursor(axisOnScreen(pk.p, boundAxis(pk.bound)));
   } else if (hover.box !== -1) {
-    hover.box = -1; hover.face = 0; canvas.style.cursor = '';
+    hover.box = -1; hover.face = 0; hover.mode = ''; canvas.style.cursor = '';
   }
   lastMove = performance.now();
   energy = 1;
@@ -540,9 +633,24 @@ addEventListener('pointermove', e => {
 
 addEventListener('pointerdown', e => {
   if (e.target.closest && e.target.closest('a, button, select, input')) return;
-  if (tilt.cur > 0.25) {                      // tilted: grab faces
-    const h = pick(e.clientX, e.clientY);
-    if (h.box >= 0) { hover.box = h.box; hover.face = h.face; beginDrag(h.box, h.face, e.clientX, e.clientY); kick(); }
+  if (tilt.cur > 0.25) {                      // tilted: draft on the ground, sculpt on boxes
+    const w = pointerToWorld(e.clientX, e.clientY);
+    if (meas.on) {
+      meas.on = false;
+      if (w) commitRect(snap(w.x), snap(w.y));
+      kick();
+      return;
+    }
+    const pk = pick(e.clientX, e.clientY);
+    if (pk.box >= 0) {
+      hover.box = pk.box; hover.mode = pk.mode; hover.bound = pk.bound;
+      hover.face = pk.mode === 'move' ? pk.face : 0;
+      beginDrag(pk, e.clientX, e.clientY);
+    } else if (w) {
+      meas.on = true;
+      meas.ax = snap(w.x); meas.ay = snap(w.y);
+    }
+    kick();
     return;
   }
   if (tilt.cur > 0.2) return;                 // mid-tilt dead zone
@@ -553,14 +661,7 @@ addEventListener('pointerdown', e => {
     meas.ax = snap(w.x); meas.ay = snap(w.y);
   } else {
     meas.on = false;
-    const hx = snap(w.x), hy = snap(w.y);
-    const lo = [Math.min(meas.ax, hx), Math.min(meas.ay, hy)];
-    const hi = [Math.max(meas.ax, hx), Math.max(meas.ay, hy)];
-    const bw = hi[0] - lo[0], bh = hi[1] - lo[1];
-    if (bw >= GRID && bh >= GRID) {
-      rects.push({ lo, hi, h: Math.max(24, Math.min(280, Math.min(bw, bh))) });
-      if (rects.length > MAXB) rects.shift();
-    }
+    commitRect(snap(w.x), snap(w.y));
   }
   kick();
 }, { passive: true });
@@ -595,7 +696,7 @@ addEventListener('keydown', e => {
 // verification hooks (harmless in normal use)
 window.__project = projectWorld;
 window.__tstate = () => ({ tilt: tilt.cur, hover: { ...hover },
-  rects: rects.map(r => ({ lo: r.lo.slice(), hi: r.hi.slice(), h: r.h })) });
+  rects: rects.map(r => ({ lo: r.lo.slice(), hi: r.hi.slice(), h: r.h, base: r.base || 0 })) });
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) { if (rafId) cancelAnimationFrame(rafId); rafId = 0; running = false; }
