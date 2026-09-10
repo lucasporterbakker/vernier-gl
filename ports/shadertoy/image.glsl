@@ -1,14 +1,19 @@
 // vernier — interactive design grid
 // https://lucasporterbakker.com
 //
+// iChannel0 = Buffer A
+//
 // An infinite 8px grid that reveals itself around the cursor, a crosshair
-// snapped to grid intersections, and click-drag dimension measuring: the
-// captured pane reads like lit glass over the grid, with a live w × h
-// readout. Release to hold the final area — the calculated dimensions
-// flash in the pane, and a faint scan-line passes while it stands.
+// that glides between grid intersections, and click-drag dimension
+// measuring: the captured pane reads like lit glass over the grid, with a
+// live w × h readout. Release and the final area holds for a beat — the
+// calculated dimensions flash in the pane, a scan-line passes once, and
+// it dissolves.
 //
 // Left alone, it measures on its own (Shadertoy can't see the mouse until
 // you click, so the idle state runs a deterministic demo loop instead).
+// Buffer A carries the state: eased crosshair, energy, and the
+// measurement lifecycle with real timestamps.
 //
 // Port of vernier-gl (the packaged version adds themes, a DOM readout,
 // render-on-demand with zero rAF at idle, and a Three.js material).
@@ -33,12 +38,6 @@ float handle(vec2 p, vec2 q, float r) {
 }
 
 vec2 snap(vec2 p) { return round(p / MINOR) * MINOR; }
-
-// deterministic wander for the self-running demo
-vec2 path(float t, vec2 R) {
-  return R * (0.5 + vec2(0.33 * sin(t * 0.53) + 0.11 * sin(t * 1.31),
-                         0.27 * sin(t * 0.71 + 1.7) + 0.09 * cos(t * 1.13)));
-}
 
 // ---- tiny 4x5 digit font, for the w × h readout ----------------------------
 
@@ -86,54 +85,34 @@ float dimsWidth(float s, int W, int H) { return float((dig(W) + 1 + dig(H)) * 5 
 // ----------------------------------------------------------------------------
 
 void mainImage(out vec4 O, in vec2 fragCoord) {
-  vec2 R = iResolution.xy;
   vec2 p = fragCoord;
   float hw = 0.5;   // hairline half-width
   float t = iTime;
 
-  bool interacted = abs(iMouse.z) > 0.5;
+  // state from Buffer A
+  vec4 s0 = texelFetch(iChannel0, ivec2(0, 0), 0);
+  vec4 s1 = texelFetch(iChannel0, ivec2(1, 0), 0);
+  vec4 s2 = texelFetch(iChannel0, ivec2(2, 0), 0);
+  vec4 s3 = texelFetch(iChannel0, ivec2(3, 0), 0);
+  vec2 cur = s0.xy, a = s1.xy, h = s1.zw, raw = s3.xy;
+  int ph = int(s2.x + 0.5);
+  float tPhase = s2.y, measA = s2.z, lastMoveT = s3.z;
 
-  vec2 raw, a, h;                            // cursor, anchor, measure head
-  float measA = 0.0, hold = 0.0, rel = 0.0;
-  float liveA = 0.0, ctrA = 0.0;             // readout: live at cursor / centered flash
+  // energy: full while the cursor moves, decays 0.7s after it rests
+  float energy = clamp(1.0 - max(0.0, t - lastMoveT - 0.7) * 1.6, 0.0, 1.0);
 
-  if (interacted) {
-    raw = iMouse.xy;
-    a = snap(abs(iMouse.zw));
-    h = snap(iMouse.xy);
-    if (iMouse.z > 0.0) {
-      measA = 1.0; liveA = 0.9;              // dragging: live measurement
-    } else {
-      measA = 0.85; hold = 1.0; ctrA = 0.5;  // released: the area stands
-      rel = fract(t / 4.0);                  // ...with a slow passing scan
-    }
-  } else {
-    // demo loop, every 7s: wander → measure → hold → sweep away
-    float n = floor(t / 7.0), c = t - n * 7.0;
-    raw = path(t, R);
-    a = snap(path(n * 7.0 + 2.0, R));
-    h = snap(raw);
-    if (c > 2.0 && c < 4.2) {
-      measA = 1.0; liveA = 0.9;
-    } else if (c >= 4.2) {
-      h = snap(path(n * 7.0 + 4.2, R));      // head frozen at release
-      hold = 1.0;
-      if (c < 4.85) {
-        measA = 1.0;
-        ctrA = 0.35 + 0.65 * exp(-(c - 4.2) * 6.0);   // flash, then settle
-      } else {
-        measA = max(0.0, 1.0 - (c - 4.85) * 1.4);
-        rel = min(1.0, (c - 4.85) / 0.48);
-        ctrA = 0.35 * measA;                           // ...then away
-      }
-    }
+  // hold flash + one-shot release sweep, timed from the phase change
+  float holdV = 0.0, rel = 0.0;
+  if (ph == 2) {
+    float th = t - tPhase;
+    holdV = min(th / 0.06, 1.0) * (1.0 + 0.35 * exp(-th * 7.0));
   }
-  vec2 ch = snap(raw);   // crosshair rides the cursor
+  if (ph == 3) { holdV = 1.0; rel = min(1.0, (t - tPhase) / 0.48); }
 
   // pointer proximity: the grid reveals itself around the cursor
   float sigma = 180.0;
   float pr = distance(p, raw);
-  float lift = exp(-(pr * pr) / (2.0 * sigma * sigma));
+  float lift = energy * exp(-(pr * pr) / (2.0 * sigma * sigma));
 
   // measurement pane geometry — the pane lights the grid under it
   vec2 lo = min(a, h), hi = max(a, h);
@@ -147,13 +126,13 @@ void mainImage(out vec4 O, in vec2 fragCoord) {
   float major = hairline(min(dMaj.x, dMaj.y), hw) * (0.060 + 0.150 * lift + 0.075 * glass);
   float dots  = hairline(max(dMaj.x, dMaj.y), 1.1) * max(lift * 0.85, glass * 0.6);
 
-  // crosshair through the snapped point
-  vec2 dc = abs(p - ch);
-  float crossHair = hairline(min(dc.x, dc.y), hw) * 0.20;
+  // crosshair through the eased snap point
+  vec2 dc = abs(p - cur);
+  float crossHair = hairline(min(dc.x, dc.y), hw) * energy * 0.20;
 
   // cursor handle
   float r = 3.5;
-  float ring = handle(p, ch, r);
+  float ring = handle(p, cur, r);
   float boxc = max(dc.x, dc.y);
   float inner = 1.0 - smoothstep(r - 0.9, r, boxc);
 
@@ -163,45 +142,49 @@ void mainImage(out vec4 O, in vec2 fragCoord) {
   float mBorder = max(hairline(ex, hw) * inY, hairline(ey, hw) * inX) * measA;
   float edgeIn = max(min(min(p.x - lo.x, hi.x - p.x), min(p.y - lo.y, hi.y - p.y)), 0.0);
   float glow = exp(-edgeIn / 16.0) * glass;
-  float mFill = glass * (0.055 + 0.045 * hold);
+  float mFill = glass * (0.055 + 0.045 * holdV);
   float mAnchor = handle(p, a, r) * measA;
 
   // completed hold: all four corners take handles
   float mCorners = min(handle(p, lo, r) + handle(p, hi, r)
                      + handle(p, vec2(lo.x, hi.y), r) + handle(p, vec2(hi.x, lo.y), r), 1.0)
-                 * hold * measA;
+                 * min(holdV, 1.0) * measA;
 
-  // release sweep: a faint accent band passes over the captured area
+  // release sweep: a faint accent band passes over the captured area once
   vec2 span = max(hi - lo, vec2(1.0));
   float sw = ((p.x - lo.x) + (hi.y - p.y)) / (span.x + span.y);
   float bd = (sw - mix(-0.2, 1.2, rel)) / 0.075;
   float band = exp(-bd * bd) * step(1e-4, rel) * smoothstep(0.0, 0.1, measA);
   float mSweep = inX * inY * band;
 
-  // the readout: live w × h beside the cursor, or the calculated area
-  // flashed in the middle of the pane on release
-  int W = int(hi.x - lo.x), H = int(hi.y - lo.y);
+  // the readout: live w × h beside the cursor while measuring, then the
+  // calculated area flashed in the middle of the pane — and gone
+  int W, H;
+  if (ph == 1) { vec2 tg = snap(raw); W = int(abs(tg.x - a.x)); H = int(abs(tg.y - a.y)); }
+  else { W = int(hi.x - lo.x); H = int(hi.y - lo.y); }
+  float liveA = ph == 1 ? 0.9 : 0.0;
+  float ctrA = ph == 2 ? 0.35 + 0.65 * exp(-(t - tPhase) * 6.0)
+             : ph == 3 ? 0.35 * measA : 0.0;
   float txt = 0.0;
-  if (liveA > 0.0)
-    txt += dims(p, h + vec2(14.0, -34.0), 2.0, W, H) * liveA;
+  if (liveA > 0.0) txt += dims(p, cur + vec2(14.0, -34.0), 2.0, W, H) * liveA;
   if (ctrA > 0.0)
     txt += dims(p, vec2((lo.x + hi.x) * 0.5 - dimsWidth(4.0, W, H) * 0.5,
-                        (lo.y + hi.y) * 0.5 - 2.5 * 4.0), 4.0, W, H) * ctrA;
+                        (lo.y + hi.y) * 0.5 - 10.0), 4.0, W, H) * ctrA;
 
   float pulse = 0.7 + 0.3 * sin(t * 2.6);
 
   vec3 col = BG;
-  col += LINE * (minor + major) * (1.0 - inner);
+  col += LINE * (minor + major) * (1.0 - inner * energy);
   col += LINE * crossHair * (1.0 - inner);
   col += AC * dots;
   col += LINE * lift * 0.012;
   col += AC * mFill;
-  col += AC * glow * (0.05 + 0.04 * hold);
+  col += AC * glow * (0.05 + 0.04 * holdV);
   col += AC * mSweep * 0.10;
-  col += AC * mBorder * (0.55 + band * 0.22 + 0.25 * hold);
+  col += AC * mBorder * (0.55 + band * 0.22 + 0.25 * min(holdV, 1.0));
   col += AC * mAnchor * 0.9;
   col += AC * mCorners * 0.9;
-  col += AC * ring * pulse;
+  col += AC * ring * energy * pulse;
   col += AC * min(txt, 1.0);
 
   O = vec4(col, 1.0);
