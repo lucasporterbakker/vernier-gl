@@ -80,52 +80,62 @@
   const click = async () => { press(); await sleep(45); release(); };
 
   /* ---------- the plan: "WEBGL" as city blocks, relative to the sheet centre, y up ----------
-     Each letter is a block of lots on a 5×7 grid of 32px cells: [x0, y0, x1, y1, height],
-     every lot its own building, so the strokes read as a skyline rather than an
-     extrusion. Tiers are the setbacks on the towers: narrower plates that stack on a
-     lot. Drafting order is build order, so every tier follows its lot. */
+     Each letter is a city block: 48px-thick strokes cut into lots, every lot its own
+     building with its own height, standing on an 8px plinth that reads as the
+     block's sidewalk. Tiers are the setbacks on the towers and the little squares are
+     rooftop plant; both are plates that stack on the lot beneath. Lots are
+     [x0, y0, x1, y1, height] in px from the letter's bottom-left corner. Drafting
+     order is build order, so each block goes plinth, lots, tiers. */
 
-  const CELL = 32, X0 = -496, Y0 = -112;   // the block is 992 × 224, centred
+  const X0 = -480, Y0 = -112;   // the five blocks span 960 × 216, avenues of 48 between
   const LETTERS = {
-    W: { at: 0, lots: [
-      [0, 0, 1, 3, 120], [0, 3, 1, 5, 200], [0, 5, 1, 7, 88],          // left stem
-      [4, 0, 5, 2, 72], [4, 2, 5, 5, 232], [4, 5, 5, 7, 136],          // right stem
-      [1, 0, 2, 1, 48], [2, 0, 3, 1, 96], [3, 0, 4, 1, 56],            // bottom bar
-      [2, 1, 3, 3, 152], [2, 3, 3, 4, 64],                             // middle stroke
-      [0.25, 3.25, 0.75, 4.75, 48], [4.25, 2.5, 4.75, 4.5, 56],        // tiers
+    W: { at: 0, w: 192, lots: [
+      [0, 0, 48, 72, 96], [0, 72, 48, 144, 224], [0, 144, 48, 216, 64],          // left stem
+      [144, 0, 192, 48, 56], [144, 48, 192, 144, 264], [144, 144, 192, 216, 120], // right stem
+      [48, 0, 96, 48, 40], [96, 0, 144, 48, 72],                                  // bottom bar
+      [72, 48, 120, 96, 160], [72, 96, 120, 144, 48],                             // middle stroke
+      [8, 80, 40, 136, 48], [16, 88, 32, 128, 32],                                // setbacks
+      [152, 56, 184, 136, 56], [160, 64, 176, 128, 40],
+      [16, 168, 32, 184, 16], [112, 16, 128, 32, 16],                             // rooftop plant
     ] },
-    E: { at: 6.5, lots: [
-      [0, 0, 1, 2, 96], [0, 2, 1, 5, 216], [0, 5, 1, 7, 144],
-      [1, 6, 3, 7, 64], [3, 6, 5, 7, 112],
-      [1, 3, 2.5, 4, 80], [2.5, 3, 4, 4, 40],
-      [1, 0, 3, 1, 56], [3, 0, 5, 1, 128],
-      [0.25, 2.5, 0.75, 4.5, 56], [3.5, 0.25, 4.5, 0.75, 40],
+    E: { at: 240, w: 144, lots: [
+      [0, 0, 48, 72, 80], [0, 72, 48, 152, 208], [0, 152, 48, 216, 128],
+      [48, 168, 96, 216, 48], [96, 168, 144, 216, 104],
+      [48, 88, 88, 128, 64], [88, 88, 120, 128, 40],
+      [48, 0, 96, 48, 56], [96, 0, 144, 48, 136],
+      [8, 80, 40, 144, 48], [16, 88, 32, 136, 32],
+      [104, 8, 136, 40, 40],
+      [112, 184, 128, 200, 16],
     ] },
-    B: { at: 13, lots: [
-      [0, 0, 1, 2, 128], [0, 2, 1, 4, 264], [0, 4, 1, 7, 176],
-      [1, 6, 3, 7, 88], [3, 6, 5, 7, 120],
-      [4, 4, 5, 6, 96],
-      [1, 3, 3, 4, 48], [3, 3, 5, 4, 72],
-      [4, 1, 5, 3, 104],
-      [1, 0, 3, 1, 64], [3, 0, 5, 1, 40],
-      [0.25, 2.25, 0.75, 3.75, 64], [4.25, 1.25, 4.75, 2.75, 32],
+    B: { at: 432, w: 144, lots: [
+      [0, 0, 48, 56, 112], [0, 56, 48, 120, 296], [0, 120, 48, 216, 152],
+      [48, 168, 96, 216, 72], [96, 168, 144, 216, 112],
+      [104, 128, 144, 168, 88],
+      [48, 88, 96, 128, 48], [96, 88, 144, 128, 64],
+      [104, 48, 144, 88, 120],
+      [48, 0, 96, 48, 40], [96, 0, 144, 48, 80],
+      [8, 64, 40, 112, 64], [16, 72, 32, 104, 48],
+      [112, 56, 136, 80, 40],
+      [16, 160, 32, 176, 16], [112, 16, 128, 32, 16],
     ] },
-    G: { at: 19.5, lots: [
-      [0, 6, 2, 7, 104], [2, 6, 4, 7, 56], [4, 6, 5, 7, 144],
-      [0, 0, 1, 3, 160], [0, 3, 1, 6, 224],
-      [0, 0, 2, 1, 72], [2, 0, 5, 1, 96],
-      [4, 1, 5, 3, 120],
-      [2, 3, 5, 4, 48],
-      [0.25, 3.5, 0.75, 5.5, 56], [4.25, 1.25, 4.75, 2.75, 40],
+    G: { at: 624, w: 144, lots: [
+      [0, 168, 48, 216, 120], [48, 168, 104, 216, 56], [104, 168, 144, 216, 168],
+      [0, 0, 48, 72, 120], [0, 72, 48, 168, 232],
+      [48, 0, 96, 48, 64], [96, 0, 144, 48, 96],
+      [104, 48, 144, 96, 136],
+      [72, 96, 144, 128, 40],
+      [8, 80, 40, 160, 56], [16, 88, 32, 152, 40],
+      [112, 176, 136, 208, 48],
+      [112, 64, 128, 80, 16],
     ] },
+    L: { at: 816, w: 144, lots: [] },   // its plinth is laid with the plan; the buildings are drafted live
   };
-  // the L is drafted live: its stem click–click, its foot by a typed size, its crown click–click
-  const LX = X0 + 26 * CELL;
-  const L_STEM = [LX, Y0, LX + CELL, Y0 + 7 * CELL];
-  const L_FOOT_ANCHOR = [LX + CELL, Y0], L_FOOT_SIZE = ['128', '32'];
-  const L_CROWN = [LX, Y0 + 2 * CELL, LX + CELL, Y0 + 4 * CELL];
-  const DROP_LO = [X0 + 19.5 * CELL, Y0 + 16];   // where the L's crown gets dropped: the G stem's lower lot
-  const N_PLAN = Object.values(LETTERS).reduce((n, l) => n + l.lots.length, 0);
+  const LX = X0 + LETTERS.L.at;
+  const L_STEM = [LX, Y0, LX + 48, Y0 + 216];
+  const L_FOOT_ANCHOR = [LX + 48, Y0], L_FOOT_SIZE = ['96', '48'];
+  const L_CROWN = [LX, Y0 + 72, LX + 48, Y0 + 120];
+  const DROP_LO = [X0 + LETTERS.G.at, Y0 + 16];   // where the L's crown gets dropped: the G stem's lowest lot
+  const N_PLAN = Object.values(LETTERS).reduce((n, l) => n + 1 + l.lots.length, 0);
   const IDX = { lStem: N_PLAN, lFoot: N_PLAN + 1, lCrown: N_PLAN + 2 };
 
   const snap8 = v => Math.round(v / 8) * 8;
@@ -134,10 +144,11 @@
 
   function cityPlates() {
     const c = centre(), out = [];
-    for (const k of 'WEBG') {
-      const ox = X0 + LETTERS[k].at * CELL;
-      for (const [x0, y0, x1, y1, h] of LETTERS[k].lots)
-        out.push({ lo: [c[0] + ox + x0 * CELL, c[1] + Y0 + y0 * CELL], hi: [c[0] + ox + x1 * CELL, c[1] + Y0 + y1 * CELL], h });
+    for (const k of 'WEBGL') {
+      const L = LETTERS[k], ox = c[0] + X0 + L.at, oy = c[1] + Y0;
+      out.push({ lo: [ox - 8, oy - 8], hi: [ox + L.w + 8, oy + 224], h: 8 });   // the plinth
+      for (const [x0, y0, x1, y1, h] of L.lots)
+        out.push({ lo: [ox + x0, oy + y0], hi: [ox + x1, oy + y1], h });
     }
     return out;
   }
@@ -226,7 +237,7 @@
     moveTo(W * 0.12, H * 0.86);
     await sleep(400);
     const plan = cityPlates();
-    for (let i = 0; i < plan.length; i++) { tbl.add(plan[i], i === 0); await sleep(38); }
+    for (let i = 0; i < plan.length; i++) { tbl.add(plan[i], i === 0); await sleep(30); }
     await sleep(700);
 
     say('drafting the last block: click&ndash;click, then a plate typed in by size');
