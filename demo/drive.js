@@ -1,12 +1,14 @@
 /* vernier — the drafting table's own demo, in-page.
 
-   The recording script, made playable: it drafts "GL" on the flat sheet,
-   tilts it, slides the L's foot home, pulls three walls up, and walks
-   once around the result — all through the same pointer, wheel, and
-   keyboard events a hand would send, so nothing is faked. It plays once
-   on a fresh, empty table after a few idle seconds; the ▶ button replays
-   it, and your own drawing is put back afterwards. Any click, scroll, or
-   key of yours stops it on the spot. */
+   The recording script, made playable: a plan of "WEBGL" as city blocks
+   draws itself on the flat sheet, the last letter is drafted live (one
+   plate typed in by size), the sheet tilts into a skyline, the new tower
+   is pulled up by its top edge, its crown is dropped onto the next tower
+   and climbs it, and the camera walks once around the block — all through
+   the same pointer, wheel, and keyboard events a hand would send, so
+   nothing is faked. It plays once on a fresh, empty table after a few
+   idle seconds; the ▶ button replays it, and your own drawing is put back
+   afterwards. Any click, scroll, or key of yours stops it on the spot. */
 
 (() => {
   const STOP = Symbol('stop');
@@ -62,6 +64,7 @@
   const wheel = (dx, dy) => tbl.canvas.dispatchEvent(new WheelEvent('wheel', {
     clientX: px, clientY: py, deltaX: dx, deltaY: dy, bubbles: true, cancelable: true,
   }));
+  const key = k => dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
   const sleep = ms => new Promise((res, rej) => {
     const id = setTimeout(() => { waiting = null; res(); }, ms);
     waiting = () => { clearTimeout(id); waiting = null; rej(STOP); };
@@ -76,32 +79,64 @@
   }
   const click = async () => { press(); await sleep(45); release(); };
 
-  /* ---------- the plan: "GL" in plates, relative to the sheet centre, y up ---------- */
+  /* ---------- the plan: "WEBGL" as city blocks, relative to the sheet centre, y up ----------
+     Letters live on a 5×7 grid of 32px cells; each plate is [x0, y0, x1, y1, height]
+     in cells, and a "crown" is a narrower plate that stacks on a stem as a setback.
+     Drafting order is build order, so every crown follows its stem. */
 
-  const PLATES = [
-    [-296, 88, 24, 168],      // G: top bar
-    [-296, -72, -216, 88],    //    stem
-    [-296, -152, 24, -72],    //    bottom bar
-    [-136, -72, 24, 8],       //    hook
-    [104, -72, 184, 168],     // L: stem
-    [184, -232, 424, -152],   //    foot, drafted a step out of place
-  ];
-  const FOOT = 5, FOOT_HOME = [104, -152];   // it slides home, flush under the stem
-  const PULLS = [
-    { box: 4, wall: 'left', dz: 160 },
-    { box: 0, wall: 'front', at: 0.62, dz: 48 },
-    { box: 2, wall: 'front', at: 0.5, dz: 32 },
-  ];
+  const CELL = 32, X0 = -496, Y0 = -112;   // the block is 992 × 224, centred
+  const LETTERS = {
+    W: { at: 0,    plates: [[0, 0, 1, 7, 192], [4, 0, 5, 7, 192], [1, 0, 4, 1, 80], [2, 1, 3, 4, 128], ['crown', 3, 5, 48]] },
+    E: { at: 6.5,  plates: [[0, 0, 1, 7, 208], [1, 6, 5, 7, 96], [1, 3, 4, 4, 80], [1, 0, 5, 1, 96], ['crown', 1, 3, 48]] },
+    B: { at: 13,   plates: [[0, 0, 1, 7, 224], [1, 6, 5, 7, 96], [4, 4, 5, 6, 72], [1, 3, 5, 4, 80], [4, 1, 5, 3, 72], [1, 0, 5, 1, 96], ['crown', 2, 4, 56]] },
+    G: { at: 19.5, plates: [[0, 6, 5, 7, 112], [0, 0, 1, 6, 176], [0, 0, 5, 1, 96], [4, 1, 5, 3, 72], [2, 3, 5, 4, 80], ['crown', 1, 3, 48]] },
+  };
+  // the L is drafted live: its stem click–click, its foot by a typed size, its crown click–click
+  const LX = X0 + 26 * CELL;
+  const L_STEM = [LX, Y0, LX + CELL, Y0 + 7 * CELL];
+  const L_FOOT_ANCHOR = [LX + CELL, Y0], L_FOOT_SIZE = ['128', '32'];
+  const L_CROWN = [LX, Y0 + 2 * CELL, LX + CELL, Y0 + 4 * CELL];
+  const G_CROWN_LO = [X0 + 19.5 * CELL, Y0 + CELL];   // where the L's crown gets dropped: on the G's own crown
+  const IDX = { gCrown: 22, lStem: 23, lFoot: 24, lCrown: 25 };
 
   const snap8 = v => Math.round(v / 8) * 8;
   const centre = () => { const [W, H] = tbl.size(); return [snap8(W / 2), snap8(H / 2)]; };
   const ground = (x, y) => { const c = centre(); return tbl.project(c[0] + x, c[1] + y, 0); };
+
+  function cityPlates() {
+    const c = centre(), out = [];
+    for (const k of 'WEBG') {
+      const ox = X0 + LETTERS[k].at * CELL;
+      for (const p of LETTERS[k].plates) {
+        if (p[0] === 'crown') {   // a setback cap on the letter's stem, the stem's full width
+          const [, y0, y1, h] = p;
+          out.push({ lo: [c[0] + ox, c[1] + Y0 + y0 * CELL], hi: [c[0] + ox + CELL, c[1] + Y0 + y1 * CELL], h });
+        } else {
+          const [x0, y0, x1, y1, h] = p;
+          out.push({ lo: [c[0] + ox + x0 * CELL, c[1] + Y0 + y0 * CELL], hi: [c[0] + ox + x1 * CELL, c[1] + Y0 + y1 * CELL], h });
+        }
+      }
+    }
+    return out;
+  }
 
   async function draft([x0, y0, x1, y1]) {
     await glide(ground(x0, y0), 12); await sleep(110);
     await click(); await sleep(80);
     await glide(ground(x1, y1), 14); await sleep(120);
     await click(); await sleep(210);
+  }
+
+  // anchor a plate with one click, then type its size: w, x, h, enter
+  async function draftTyped([x0, y0], [w, h]) {
+    await glide(ground(x0, y0), 12); await sleep(110);
+    await click(); await sleep(80);
+    await glide(ground(x0 + 48, y0 + 24), 8); await sleep(200);
+    for (const ch of w) { key(ch); await sleep(110); }
+    key('x'); await sleep(140);
+    for (const ch of h) { key(ch); await sleep(110); }
+    await sleep(320);
+    key('Enter'); await sleep(260);
   }
 
   // find the top edge of a wall on screen: probe just below its projected line
@@ -144,42 +179,53 @@
   const TAKE = ' &nbsp;&middot;&nbsp; <em>click, scroll, or type</em> to take over';
   const say = t => tbl.hint(DEMO + t + TAKE);
 
+  // move a volume by its top face to a new low corner: the aim accounts for
+  // the hand's own parallax, since the table tracks the sheet point under it
+  async function slide(idx, lo) {
+    const c = centre();
+    const st = tbl.state();
+    const r = st.rects[idx];
+    if (!r) return;
+    const rk = Math.min(1, st.tilt * 3.2);
+    const fc = tbl.project((r.lo[0] + r.hi[0]) / 2, (r.lo[1] + r.hi[1]) / 2, (r.base + r.h) * rk);
+    if (!fc) return;
+    await glide(fc, 20); await sleep(500);
+    press();
+    const g0 = tbl.ground(px, py);
+    const dest = g0 && tbl.project(c[0] + lo[0] + (g0.x - r.lo[0]), c[1] + lo[1] + (g0.y - r.lo[1]), 0);
+    if (dest) await glide(dest, 22, 26);
+    release();
+    await sleep(650);
+  }
+
   async function run() {
     const [W, H] = tbl.size();
-    say('drafting the plan on the flat sheet, click&ndash;click');
-    moveTo(W * 0.14, H * 0.84);
-    await sleep(500);
-    for (const p of PLATES) await draft(p);
-    await glide([W * 0.86, H * 0.86], 14); await sleep(900);
+    say('a plan, drafted flat: five letters as city blocks');
+    moveTo(W * 0.12, H * 0.86);
+    await sleep(400);
+    const plan = cityPlates();
+    for (let i = 0; i < plan.length; i++) { tbl.add(plan[i], i === 0); await sleep(65); }
+    await sleep(700);
+
+    say('drafting the L: click&ndash;click, then a plate typed in by size');
+    await draft(L_STEM);
+    await draftTyped(L_FOOT_ANCHOR, L_FOOT_SIZE);
+    await draft(L_CROWN);
+    await glide([W * 0.86, H * 0.86], 14); await sleep(700);
 
     // tilt the sheet into perspective (the target leads; the view eases after it)
-    say('tilting the sheet &mdash; the plan stands up into volumes');
+    say('tilting the sheet &mdash; the plan stands up into a skyline');
     for (let i = 0; i < 60 && tbl.state().tiltTgt < 0.52; i++) { wheel(0, 42); await sleep(42); }
     await sleep(1800);
 
-    // slide the foot home: the aim accounts for the hand's own parallax
-    say('sliding the foot home &mdash; the gap reads the clearance');
-    const c = centre();
-    const st = tbl.state();
-    const r = st.rects[FOOT];
-    const rk = Math.min(1, st.tilt * 3.2);
-    const fc = tbl.project((r.lo[0] + r.hi[0]) / 2, (r.lo[1] + r.hi[1]) / 2, (r.base + r.h) * rk);
-    if (fc) {
-      await glide(fc, 20); await sleep(500);
-      press();
-      const g0 = tbl.ground(px, py);
-      const dest = g0 && tbl.project(c[0] + FOOT_HOME[0] + (g0.x - r.lo[0]), c[1] + FOOT_HOME[1] + (g0.y - r.lo[1]), 0);
-      if (dest) await glide(dest, 18, 26);
-      release();
-      await sleep(650);
-    }
+    say('pulling the new tower up by its top edge');
+    await pull({ box: IDX.lStem, wall: 'front', at: 0.5, dz: 208 });
 
-    // pull three walls up
-    say('pulling walls up by their top edge');
-    for (const t of PULLS) await pull(t);
+    say('dropping its crown on the next tower &mdash; it climbs to the top');
+    await slide(IDX.lCrown, G_CROWN_LO);
 
     // and walk around it once
-    say('walking around it');
+    say('walking around the block');
     await glide([W * 0.9, H * 0.88], 14); await sleep(300);
     const tv = tbl.state().tilt, ease = tv * tv * (3 - 2 * tv), want = 2 * Math.PI / ease;
     for (let i = 0; i < 240 && tbl.state().orbitTgt < want; i++) { wheel(34, 0); await sleep(46); }

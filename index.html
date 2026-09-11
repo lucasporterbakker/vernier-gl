@@ -41,13 +41,14 @@
   #gaps text { fill: var(--ac); font: 11px 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
   #gaps .flush line { stroke: var(--fg); opacity: 1; }
   #gaps .flush text { fill: var(--fg); }
-  #play {
-    position: fixed; right: 22px; bottom: 12px; z-index: 3;
+  #tools { position: fixed; right: 22px; bottom: 12px; z-index: 3; display: flex; gap: 18px; }
+  #tools button {
     background: none; border: 0; padding: 4px 0; margin: 0;
     color: var(--fg1); font: inherit; font-size: 11px; letter-spacing: 0.02em;
     cursor: pointer; opacity: 0.85;
   }
-  #play:hover { color: var(--fg); opacity: 1; }
+  #tools button:hover { color: var(--fg); opacity: 1; }
+  #tools button[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -59,7 +60,7 @@
 <div class="dim" id="dh" aria-hidden="true"></div>
 <div class="dim" id="dz" aria-hidden="true"></div>
 <svg id="gaps" aria-hidden="true"></svg>
-<button id="play" type="button" aria-label="watch a demo">&#9654; watch</button>
+<div id="tools"><button id="clear" type="button" aria-label="clear the sheet">&#10005; clear</button><button id="play" type="button" aria-label="watch a demo">&#9654; watch</button></div>
 
 <script type="importmap">
 { "imports": { "three": "https://unpkg.com/three@0.170.0/build/three.module.js" } }
@@ -1187,6 +1188,18 @@ document.addEventListener('visibilitychange', () => {
 });
 addEventListener('resize', resize);
 
+// a clean sheet, one undo step away
+document.getElementById('clear').addEventListener('click', () => {
+  if (!rects.length) return;
+  checkpoint();
+  rects.length = 0;
+  hover.box = -1; hover.face = 0; hover.mode = ''; drag.on = false; meas.on = false;
+  canvas.style.cursor = '';
+  clearEntry();
+  persist();
+  kick();
+});
+
 // restore a shared link, else last session's drawing
 const fromLink = (() => {
   const dm = location.hash.match(/d=([^&]*)/);
@@ -1232,6 +1245,12 @@ window.__table = {
     restoreList(s.d);
   },
   clear: () => { rects.length = 0; hover.box = -1; hover.face = 0; hover.mode = ''; drag.on = false; meas.on = false; canvas.style.cursor = ''; kick(); },
+  add: (r, mark) => {   // a plate placed by the demo, as if just drafted
+    if (mark) checkpoint();
+    rects.push({ lo: r.lo.slice(), hi: r.hi.slice(), h: Math.max(GRID, Math.min(640, r.h)), base: 0, born: performance.now() });
+    if (rects.length > MAXB) rects.shift();
+    kick();
+  },
   resetView: () => { tilt.tgt = 0; orbit.tgt = 0; zoom.tgt = 1; kick(); },
   quiet: v => { quiet = !!v; },
   hint: t => { hintOverride = t; kick(); },
