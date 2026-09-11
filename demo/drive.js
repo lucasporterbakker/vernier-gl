@@ -61,8 +61,8 @@
   const moveTo = (x, y) => { px = x; py = y; cursor.at(x, y); ptr('pointermove', { buttons: held ? 1 : 0 }); };
   const press = () => { held = true; ptr('pointerdown', { buttons: 1 }); };
   const release = () => { held = false; ptr('pointerup', { buttons: 0 }); };
-  const wheel = (dx, dy) => tbl.canvas.dispatchEvent(new WheelEvent('wheel', {
-    clientX: px, clientY: py, deltaX: dx, deltaY: dy, bubbles: true, cancelable: true,
+  const wheel = (dx, dy, pinch) => tbl.canvas.dispatchEvent(new WheelEvent('wheel', {
+    clientX: px, clientY: py, deltaX: dx, deltaY: dy, ctrlKey: !!pinch, bubbles: true, cancelable: true,
   }));
   const key = k => dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
   const sleep = ms => new Promise((res, rej) => {
@@ -80,24 +80,53 @@
   const click = async () => { press(); await sleep(45); release(); };
 
   /* ---------- the plan: "WEBGL" as city blocks, relative to the sheet centre, y up ----------
-     Letters live on a 5×7 grid of 32px cells; each plate is [x0, y0, x1, y1, height]
-     in cells, and a "crown" is a narrower plate that stacks on a stem as a setback.
-     Drafting order is build order, so every crown follows its stem. */
+     Each letter is a block of lots on a 5×7 grid of 32px cells: [x0, y0, x1, y1, height],
+     every lot its own building, so the strokes read as a skyline rather than an
+     extrusion. Tiers are the setbacks on the towers: narrower plates that stack on a
+     lot. Drafting order is build order, so every tier follows its lot. */
 
   const CELL = 32, X0 = -496, Y0 = -112;   // the block is 992 × 224, centred
   const LETTERS = {
-    W: { at: 0,    plates: [[0, 0, 1, 7, 192], [4, 0, 5, 7, 192], [1, 0, 4, 1, 80], [2, 1, 3, 4, 128], ['crown', 3, 5, 48]] },
-    E: { at: 6.5,  plates: [[0, 0, 1, 7, 208], [1, 6, 5, 7, 96], [1, 3, 4, 4, 80], [1, 0, 5, 1, 96], ['crown', 1, 3, 48]] },
-    B: { at: 13,   plates: [[0, 0, 1, 7, 224], [1, 6, 5, 7, 96], [4, 4, 5, 6, 72], [1, 3, 5, 4, 80], [4, 1, 5, 3, 72], [1, 0, 5, 1, 96], ['crown', 2, 4, 56]] },
-    G: { at: 19.5, plates: [[0, 6, 5, 7, 112], [0, 0, 1, 6, 176], [0, 0, 5, 1, 96], [4, 1, 5, 3, 72], [2, 3, 5, 4, 80], ['crown', 1, 3, 48]] },
+    W: { at: 0, lots: [
+      [0, 0, 1, 3, 120], [0, 3, 1, 5, 200], [0, 5, 1, 7, 88],          // left stem
+      [4, 0, 5, 2, 72], [4, 2, 5, 5, 232], [4, 5, 5, 7, 136],          // right stem
+      [1, 0, 2, 1, 48], [2, 0, 3, 1, 96], [3, 0, 4, 1, 56],            // bottom bar
+      [2, 1, 3, 3, 152], [2, 3, 3, 4, 64],                             // middle stroke
+      [0.25, 3.25, 0.75, 4.75, 48], [4.25, 2.5, 4.75, 4.5, 56],        // tiers
+    ] },
+    E: { at: 6.5, lots: [
+      [0, 0, 1, 2, 96], [0, 2, 1, 5, 216], [0, 5, 1, 7, 144],
+      [1, 6, 3, 7, 64], [3, 6, 5, 7, 112],
+      [1, 3, 2.5, 4, 80], [2.5, 3, 4, 4, 40],
+      [1, 0, 3, 1, 56], [3, 0, 5, 1, 128],
+      [0.25, 2.5, 0.75, 4.5, 56], [3.5, 0.25, 4.5, 0.75, 40],
+    ] },
+    B: { at: 13, lots: [
+      [0, 0, 1, 2, 128], [0, 2, 1, 4, 264], [0, 4, 1, 7, 176],
+      [1, 6, 3, 7, 88], [3, 6, 5, 7, 120],
+      [4, 4, 5, 6, 96],
+      [1, 3, 3, 4, 48], [3, 3, 5, 4, 72],
+      [4, 1, 5, 3, 104],
+      [1, 0, 3, 1, 64], [3, 0, 5, 1, 40],
+      [0.25, 2.25, 0.75, 3.75, 64], [4.25, 1.25, 4.75, 2.75, 32],
+    ] },
+    G: { at: 19.5, lots: [
+      [0, 6, 2, 7, 104], [2, 6, 4, 7, 56], [4, 6, 5, 7, 144],
+      [0, 0, 1, 3, 160], [0, 3, 1, 6, 224],
+      [0, 0, 2, 1, 72], [2, 0, 5, 1, 96],
+      [4, 1, 5, 3, 120],
+      [2, 3, 5, 4, 48],
+      [0.25, 3.5, 0.75, 5.5, 56], [4.25, 1.25, 4.75, 2.75, 40],
+    ] },
   };
   // the L is drafted live: its stem click–click, its foot by a typed size, its crown click–click
   const LX = X0 + 26 * CELL;
   const L_STEM = [LX, Y0, LX + CELL, Y0 + 7 * CELL];
   const L_FOOT_ANCHOR = [LX + CELL, Y0], L_FOOT_SIZE = ['128', '32'];
   const L_CROWN = [LX, Y0 + 2 * CELL, LX + CELL, Y0 + 4 * CELL];
-  const G_CROWN_LO = [X0 + 19.5 * CELL, Y0 + CELL];   // where the L's crown gets dropped: on the G's own crown
-  const IDX = { gCrown: 22, lStem: 23, lFoot: 24, lCrown: 25 };
+  const DROP_LO = [X0 + 19.5 * CELL, Y0 + 16];   // where the L's crown gets dropped: the G stem's lower lot
+  const N_PLAN = Object.values(LETTERS).reduce((n, l) => n + l.lots.length, 0);
+  const IDX = { lStem: N_PLAN, lFoot: N_PLAN + 1, lCrown: N_PLAN + 2 };
 
   const snap8 = v => Math.round(v / 8) * 8;
   const centre = () => { const [W, H] = tbl.size(); return [snap8(W / 2), snap8(H / 2)]; };
@@ -107,15 +136,8 @@
     const c = centre(), out = [];
     for (const k of 'WEBG') {
       const ox = X0 + LETTERS[k].at * CELL;
-      for (const p of LETTERS[k].plates) {
-        if (p[0] === 'crown') {   // a setback cap on the letter's stem, the stem's full width
-          const [, y0, y1, h] = p;
-          out.push({ lo: [c[0] + ox, c[1] + Y0 + y0 * CELL], hi: [c[0] + ox + CELL, c[1] + Y0 + y1 * CELL], h });
-        } else {
-          const [x0, y0, x1, y1, h] = p;
-          out.push({ lo: [c[0] + ox + x0 * CELL, c[1] + Y0 + y0 * CELL], hi: [c[0] + ox + x1 * CELL, c[1] + Y0 + y1 * CELL], h });
-        }
-      }
+      for (const [x0, y0, x1, y1, h] of LETTERS[k].lots)
+        out.push({ lo: [c[0] + ox + x0 * CELL, c[1] + Y0 + y0 * CELL], hi: [c[0] + ox + x1 * CELL, c[1] + Y0 + y1 * CELL], h });
     }
     return out;
   }
@@ -200,14 +222,14 @@
 
   async function run() {
     const [W, H] = tbl.size();
-    say('a plan, drafted flat: five letters as city blocks');
+    say('a plan, drafted flat: five city blocks that spell a word');
     moveTo(W * 0.12, H * 0.86);
     await sleep(400);
     const plan = cityPlates();
-    for (let i = 0; i < plan.length; i++) { tbl.add(plan[i], i === 0); await sleep(65); }
+    for (let i = 0; i < plan.length; i++) { tbl.add(plan[i], i === 0); await sleep(38); }
     await sleep(700);
 
-    say('drafting the L: click&ndash;click, then a plate typed in by size');
+    say('drafting the last block: click&ndash;click, then a plate typed in by size');
     await draft(L_STEM);
     await draftTyped(L_FOOT_ANCHOR, L_FOOT_SIZE);
     await draft(L_CROWN);
@@ -221,14 +243,18 @@
     say('pulling the new tower up by its top edge');
     await pull({ box: IDX.lStem, wall: 'front', at: 0.5, dz: 208 });
 
-    say('dropping its crown on the next tower &mdash; it climbs to the top');
-    await slide(IDX.lCrown, G_CROWN_LO);
+    say('dropping its crown on the next block &mdash; it climbs to the top');
+    await slide(IDX.lCrown, DROP_LO);
 
-    // and walk around it once
-    say('walking around the block');
+    // pinch out, drop the camera to street height, and walk around the block
+    say('pinching out, tilting low, and walking around the block');
     await glide([W * 0.9, H * 0.88], 14); await sleep(300);
+    for (let i = 0; i < 4; i++) { wheel(0, 5, true); await sleep(60); }
+    await sleep(500);
+    for (let i = 0; i < 60 && tbl.state().tiltTgt < 0.86; i++) { wheel(0, 42); await sleep(42); }
+    await sleep(1400);
     const tv = tbl.state().tilt, ease = tv * tv * (3 - 2 * tv), want = 2 * Math.PI / ease;
-    for (let i = 0; i < 240 && tbl.state().orbitTgt < want; i++) { wheel(34, 0); await sleep(46); }
+    for (let i = 0; i < 240 && tbl.state().orbitTgt < want; i++) { wheel(30, 0); await sleep(46); }
     await sleep(2600);
   }
 

@@ -67,7 +67,7 @@ while the dolly compensates so the plan never pops, and `Raycaster`
 picking. Its light is analytic but not per-frame: the sun is fixed, so
 the ground's shadows are baked into a sheet-space texture whenever the
 model changes, and each volume tests only the neighbours that can
-actually shade it — orbiting costs nothing extra at sixty-four volumes.
+actually shade it — orbiting costs nothing extra at the ninety-six-volume cap.
 `/demo/table.html` is the same table with zero dependencies — one
 fragment shader raytracing the volumes and their shadows itself, every
 pixel, every frame it draws.
