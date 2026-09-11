@@ -35,6 +35,19 @@
     color: var(--ac); font-size: 11px; white-space: nowrap;
     opacity: 0; will-change: transform;
   }
+  .typed { color: var(--fg); border-bottom: 1px solid var(--ac); padding-bottom: 1px; }
+  #gaps { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 2; pointer-events: none; overflow: visible; }
+  #gaps line { stroke: var(--ac); stroke-width: 1; opacity: 0.8; }
+  #gaps text { fill: var(--ac); font: 11px 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #gaps .flush line { stroke: var(--fg); opacity: 1; }
+  #gaps .flush text { fill: var(--fg); }
+  #play {
+    position: fixed; right: 22px; bottom: 12px; z-index: 3;
+    background: none; border: 0; padding: 4px 0; margin: 0;
+    color: var(--fg1); font: inherit; font-size: 11px; letter-spacing: 0.02em;
+    cursor: pointer; opacity: 0.85;
+  }
+  #play:hover { color: var(--fg); opacity: 1; }
 </style>
 </head>
 <body>
@@ -45,6 +58,8 @@
 <div class="dim" id="dw" aria-hidden="true"></div>
 <div class="dim" id="dh" aria-hidden="true"></div>
 <div class="dim" id="dz" aria-hidden="true"></div>
+<svg id="gaps" aria-hidden="true"></svg>
+<button id="play" type="button" aria-label="watch a demo">&#9654; watch</button>
 
 <script type="importmap">
 { "imports": { "three": "https://unpkg.com/three@0.170.0/build/three.module.js" } }
@@ -56,25 +71,30 @@
    carrying the vernier grid, a PerspectiveCamera whose fov morphs from
    near-ortho (2°) to 31° while the dolly compensates — the flat plan stays
    pixel-true — and Raycaster picking. The sun stays analytic in-shader so
-   hairlines and penumbras remain crisp. State, gestures, undo, and the
-   share-link format are identical to the zero-dependency edition. */
+   hairlines and penumbras remain crisp; the ground's shadows are baked
+   into a sheet-space texture whenever the model changes, and each volume
+   only tests the neighbours that can actually shade it. State, gestures,
+   undo, and the share-link format are identical to the zero-dependency
+   edition. */
 
 import * as THREE from 'three';
 
-const MAXB = 16, GRID = 8;
+const MAXB = 64, GRID = 8, OCC = 12;
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const SUN = [-0.4006, -0.2504, 0.8814];
 
 /* ---------- shared GLSL ---------- */
 
 const CHUNK = `
 const vec3 SUN = vec3(-0.4006, -0.2504, 0.8814);
 
-uniform vec2  uBLo[${MAXB}];
-uniform vec2  uBHi[${MAXB}];
-uniform float uBB[${MAXB}];
-uniform float uBH[${MAXB}];
+// the model, as a tiny float texture: texel (i,0) = lo.xy hi.xy, (i,1) = base, height
+uniform sampler2D uBoxTex;
 uniform int   uN;
 uniform vec3  uBg, uLine, uAc;
+
+vec4 boxXY(int i) { return texelFetch(uBoxTex, ivec2(i, 0), 0); }
+vec2 boxZ(int i)  { return texelFetch(uBoxTex, ivec2(i, 1), 0).xy; }
 
 float lineAA(float d, float fw) { return 1.0 - smoothstep(0.5, 1.5, d / max(fw, 1e-6)); }
 
@@ -95,6 +115,26 @@ float boxShadow(vec3 p, vec3 blo, vec3 bhi) {
   float d = max(dxy.x, dxy.y);
   float w = 3.0 + tm * 0.16;
   return mix(0.45, 1.0, smoothstep(-0.25 * w, w, d));
+}
+
+// contact occlusion where a plate rests on a receiver: the ground, or a top face
+float contactAO(vec2 p, vec2 lo, vec2 hi) {
+  vec2 d = max(lo - p, p - hi);
+  return 0.80 + 0.20 * smoothstep(0.0, 16.0, max(d.x, d.y));
+}
+
+// rulers: the pane's edges are scales — a tick every minor, a longer one every major
+float rulers(vec2 p, vec2 lo, vec2 hi, vec2 fw) {
+  vec2 gmin = abs(p / 8.0 - round(p / 8.0)) * 8.0;
+  vec2 gmaj = abs(p / 64.0 - round(p / 64.0)) * 64.0;
+  vec2 len = mix(vec2(3.0), vec2(6.0), step(gmaj, vec2(0.5)));
+  float nearX = step(lo.y, p.y) * step(p.y, lo.y + len.x) + step(hi.y - len.x, p.y) * step(p.y, hi.y);
+  float nearY = step(lo.x, p.x) * step(p.x, lo.x + len.y) + step(hi.x - len.y, p.x) * step(p.x, hi.x);
+  float inX = step(lo.x, p.x) * step(p.x, hi.x), inY = step(lo.y, p.y) * step(p.y, hi.y);
+  float tx = lineAA(gmin.x, fw.x) * min(nearX, 1.0) * inX;
+  float ty = lineAA(gmin.y, fw.y) * min(nearY, 1.0) * inY;
+  float moire = smoothstep(2.5, 5.0, 8.0 / max(fw.x, fw.y));
+  return max(tx, ty) * moire;
 }`;
 
 const GROUND_VERT = `
@@ -118,6 +158,9 @@ uniform float uMeasA;
 uniform float uOrthoK;   // 1 = flat plan
 uniform float uHalfH;    // view half height (world units)
 uniform vec2  uPivot;    // the camera's ground focus
+uniform sampler2D uShadow;   // baked: r = sun shadow, g = contact occlusion
+uniform vec4  uShExt;        // sheet-space extent of the bake: origin.xy, size.xy
+uniform float uShOn;
 
 void main() {
   vec2 p = vW.xy;
@@ -153,20 +196,20 @@ void main() {
   float inY = step(lo.y - 4.0, p.y) * step(p.y, hi.y + 4.0);
   float mBorder = max(lineAA(ex, fw.x) * inY * step(lo.y, p.y) * step(p.y, hi.y),
                       lineAA(ey, fw.y) * inX * step(lo.x, p.x) * step(p.x, hi.x)) * uMeasA;
+  float mRuler = rulers(p, lo, hi, fw) * uMeasA;
   float edgeIn = max(min(min(p.x - lo.x, hi.x - p.x), min(p.y - lo.y, hi.y - p.y)), 0.0);
   float glow = exp(-edgeIn / 16.0) * glass;
 
   // drafted footprints stay inked; an elevated block's ink lifts off with the tilt
   float fpB = 0.0, fpF = 0.0;
-  for (int i = 0; i < ${MAXB}; i++) {
-    if (i >= uN) break;
-    float ink = uBB[i] < 0.5 ? 1.0 : uOrthoK;
+  for (int i = 0; i < uN; i++) {
+    float ink = boxZ(i).x < 0.5 ? 1.0 : uOrthoK;
     if (ink < 0.01) continue;
-    vec2 l2 = uBLo[i], h2 = uBHi[i];
-    float iX = step(l2.x, p.x) * step(p.x, h2.x);
-    float iY = step(l2.y, p.y) * step(p.y, h2.y);
-    float ex2 = min(abs(p.x - l2.x), abs(p.x - h2.x));
-    float ey2 = min(abs(p.y - l2.y), abs(p.y - h2.y));
+    vec4 b = boxXY(i);
+    float iX = step(b.x, p.x) * step(p.x, b.z);
+    float iY = step(b.y, p.y) * step(p.y, b.w);
+    float ex2 = min(abs(p.x - b.x), abs(p.x - b.z));
+    float ey2 = min(abs(p.y - b.y), abs(p.y - b.w));
     fpB = max(fpB, max(lineAA(ex2, fw.x) * iY, lineAA(ey2, fw.y) * iX) * ink);
     fpF = max(fpF, iX * iY * ink);
   }
@@ -180,20 +223,20 @@ void main() {
   col += uAc * glass * 0.055;
   col += uAc * glow * 0.05;
 
+  // the light arrives pre-computed: the bake holds every volume's shadow and contact
   float sh = 1.0, ao = 1.0;
-  for (int i = 0; i < ${MAXB}; i++) {
-    if (i >= uN) break;
-    if (uBH[i] < 0.5) continue;
-    sh = min(sh, boxShadow(vW, vec3(uBLo[i], uBB[i]), vec3(uBHi[i], uBB[i] + uBH[i])));
-    if (uBB[i] < 0.5) {
-      vec2 dc2 = max(uBLo[i] - p, p - uBHi[i]);
-      ao *= 0.80 + 0.20 * smoothstep(0.0, 16.0, max(dc2.x, dc2.y));
+  if (uShOn > 0.5) {
+    vec2 suv = (p - uShExt.xy) / uShExt.zw;
+    if (all(greaterThanEqual(suv, vec2(0.0))) && all(lessThanEqual(suv, vec2(1.0)))) {
+      vec2 sa = textureLod(uShadow, suv, 0.0).rg;
+      sh = sa.r; ao = sa.g;
     }
   }
   col *= mix(1.0, sh, 0.88) * ao;
 
   col += uLine * cross * (1.0 - inner);
   col += uAc * mBorder * 0.55;
+  col += uAc * mRuler * 0.50;
   col += uAc * ring * uPulse;
 
   O = vec4(col, 1.0);
@@ -216,11 +259,12 @@ in vec3 vN;
 ${CHUNK}
 uniform vec3  uLo;       // this volume: lo.xy, base
 uniform vec3  uHi;       // hi.xy, top
-uniform float uIdx;
 uniform float uHovOn;    // 1 while this box is hovered
 uniform float uHovFace;  // face id with the hand on it (0 = none)
 uniform float uHalfH;
 uniform vec2  uPivot;
+uniform float uOcc[${OCC}];   // the neighbours that can shade this volume
+uniform int   uOccN;
 
 void main() {
   vec3 p = vW;
@@ -244,20 +288,48 @@ void main() {
   float hovFace = (uHovOn > 0.5 && abs(faceId - uHovFace) < 0.5) ? 1.0 : 0.0;
 
   float lam = 0.35 + 0.65 * max(dot(n, SUN), 0.0);
-  float sh = 1.0;
-  for (int i = 0; i < ${MAXB}; i++) {
-    if (i >= uN) break;
-    if (float(i) == uIdx || uBH[i] < 0.5) continue;
-    sh = min(sh, boxShadow(p + n * 0.5, vec3(uBLo[i], uBB[i]), vec3(uBHi[i], uBB[i] + uBH[i])));
+  float sh = 1.0, ao = 1.0;
+  for (int k = 0; k < ${OCC}; k++) {
+    if (k >= uOccN) break;
+    int i = int(uOcc[k] + 0.5);
+    vec4 b = boxXY(i); vec2 z = boxZ(i);
+    sh = min(sh, boxShadow(p + n * 0.5, vec3(b.xy, z.x), vec3(b.zw, z.x + z.y)));
+    // a plate resting on this top face shades the paper under it, as on the ground
+    if (n.z > 0.5 && abs(z.x - uHi.z) < 1.0) ao *= contactAO(p.xy, b.xy, b.zw);
   }
 
   vec3 col = vec3(0.0);
   vec3 fcol = uBg * 0.35 + uLine * (minor + major) * fade + uAc * abs(n.z) * 0.020;
-  col += fcol * lam * mix(1.0, sh, 0.85);
+  col += fcol * lam * mix(1.0, sh, 0.85) * ao;
   col += uAc * hovFace * 0.045;
   col += uAc * edge * (0.72 + 0.28 * uHovOn) * fade;
 
   O = vec4(col, 1.0);
+}`;
+
+// the bake: every ground texel's shadow and contact, computed once per model change
+const BAKE_VERT = `
+out vec2 vUv;
+void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+
+const BAKE_FRAG = `
+precision highp float;
+out vec4 O;
+in vec2 vUv;
+${CHUNK}
+uniform vec4 uExt;   // sheet-space origin.xy, size.xy
+
+void main() {
+  vec2 p = uExt.xy + vUv * uExt.zw;
+  float sh = 1.0, ao = 1.0;
+  for (int i = 0; i < uN; i++) {
+    vec2 z = boxZ(i);
+    if (z.y < 0.5) continue;
+    vec4 b = boxXY(i);
+    sh = min(sh, boxShadow(vec3(p, 0.0), vec3(b.xy, z.x), vec3(b.zw, z.x + z.y)));
+    if (z.x < 0.5) ao *= contactAO(p, b.xy, b.zw);
+  }
+  O = vec4(sh, ao, 0.0, 1.0);
 }`;
 
 /* ---------- three setup ---------- */
@@ -274,12 +346,16 @@ const camera = new THREE.PerspectiveCamera(31.4, 1, 100, 100000);
 camera.matrixAutoUpdate = false;
 
 const HEX = h => new THREE.Color(h);
-const boxArrays = {
-  uBLo: { value: Array.from({ length: MAXB }, () => new THREE.Vector2()) },
-  uBHi: { value: Array.from({ length: MAXB }, () => new THREE.Vector2()) },
-  uBB:  { value: new Float32Array(MAXB) },
-  uBH:  { value: new Float32Array(MAXB) },
-  uN:   { value: 0 },
+
+const boxData = new Float32Array(MAXB * 2 * 4);
+const boxTex = new THREE.DataTexture(boxData, MAXB, 2, THREE.RGBAFormat, THREE.FloatType);
+boxTex.minFilter = boxTex.magFilter = THREE.NearestFilter;
+boxTex.generateMipmaps = false;
+boxTex.needsUpdate = true;
+
+const shared = {
+  uBoxTex: { value: boxTex },
+  uN:      { value: 0 },
 };
 const palette = {
   uBg:   { value: HEX('#0e0f15') },
@@ -287,12 +363,30 @@ const palette = {
   uAc:   { value: HEX('#a9c1fa') },
 };
 
+const shadowRT = new THREE.WebGLRenderTarget(64, 64, {
+  depthBuffer: false, stencilBuffer: false, generateMipmaps: false,
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat, type: THREE.UnsignedByteType,
+});
+const bakeMat = new THREE.ShaderMaterial({
+  glslVersion: THREE.GLSL3,
+  vertexShader: BAKE_VERT,
+  fragmentShader: BAKE_FRAG,
+  uniforms: { ...shared, ...palette, uExt: { value: new THREE.Vector4(0, 0, 1, 1) } },
+  depthTest: false, depthWrite: false,
+});
+const bakeScene = new THREE.Scene();
+const bakeMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bakeMat);
+bakeMesh.frustumCulled = false;
+bakeScene.add(bakeMesh);
+const bakeCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
 const groundMat = new THREE.ShaderMaterial({
   glslVersion: THREE.GLSL3,
   vertexShader: GROUND_VERT,
   fragmentShader: GROUND_FRAG,
   uniforms: {
-    ...boxArrays, ...palette,
+    ...shared, ...palette,
     uRaw:    { value: new THREE.Vector2(-1e4, -1e4) },
     uCross:  { value: new THREE.Vector2(-1e4, -1e4) },
     uEnergy: { value: 0 },
@@ -302,6 +396,9 @@ const groundMat = new THREE.ShaderMaterial({
     uOrthoK: { value: 1 },
     uHalfH:  { value: 400 },
     uPivot:  { value: new THREE.Vector2(0, 0) },
+    uShadow: { value: shadowRT.texture },
+    uShExt:  { value: new THREE.Vector4(0, 0, 1, 1) },
+    uShOn:   { value: 0 },
   },
 });
 const ground = new THREE.Mesh(new THREE.PlaneGeometry(60000, 60000), groundMat);
@@ -316,14 +413,15 @@ for (let i = 0; i < MAXB; i++) {
     vertexShader: BOX_VERT,
     fragmentShader: BOX_FRAG,
     uniforms: {
-      ...boxArrays, ...palette,
+      ...shared, ...palette,
       uLo: { value: new THREE.Vector3() },
       uHi: { value: new THREE.Vector3() },
-      uIdx: { value: i },
       uHovOn: { value: 0 },
       uHovFace: { value: 0 },
       uHalfH: { value: 400 },
       uPivot: { value: new THREE.Vector2(0, 0) },
+      uOcc: { value: new Float32Array(OCC) },
+      uOccN: { value: 0 },
     },
   });
   const m = new THREE.Mesh(boxGeo, mat);
@@ -335,7 +433,6 @@ for (let i = 0; i < MAXB; i++) {
 
 /* ---------- state (same instrument as the zero-dep edition) ---------- */
 
-const TAN = 0.28;
 let dpr = 1, W = 0, H = 0;
 let energy = 0, lastMove = -1e9, lastT = 0, rafId = 0, running = false;
 
@@ -351,17 +448,19 @@ const rects = [];
 const hover = { box: -1, face: 0, mode: '', bound: '' };
 const drag = { on: false, box: -1, mode: '', bound: '', unit: [0, 0], perUnit: 1,
                start: 0, lo0: null, hi0: null, sx: 0, sy: 0, offX: 0, offY: 0, szX: 0, szY: 0 };
+const entry = { buf: ['', ''], field: 0 };   // a typed dimension, mid-gesture
 
 const readout = document.getElementById('readout');
 const dw = document.getElementById('dw'), dh = document.getElementById('dh'), dz = document.getElementById('dz');
+const gaps = document.getElementById('gaps');
 const hint = document.getElementById('hint');
-let hintTilted = false;
+let hintTilted = false, hintOverride = null;
 const snap = v => Math.round(v / GRID) * GRID;
 const riseK = () => Math.min(1, tilt.cur * 3.2);
 
-function place(el, text, s, ox, oy) {
+function place(el, text, s, ox, oy, html) {
   if (!s) { el.style.opacity = '0'; return; }
-  el.textContent = text;
+  if (html) el.innerHTML = text; else el.textContent = text;
   el.style.transform = `translate(${Math.round(s[0] + ox)}px, ${Math.round(s[1] + oy)}px)`;
   el.style.opacity = '0.95';
 }
@@ -396,6 +495,7 @@ function commitRect(hx, hy) {
 /* ---------- share links, undo, persistence (same format) ---------- */
 
 const STORE_KEY = 'vernier-table';
+let quiet = false;   // the in-page demo draws without touching the address bar or storage
 
 function serialize() {
   return rects.map(r => [r.lo[0] / GRID, r.lo[1] / GRID,
@@ -420,6 +520,7 @@ function deserialize(s) {
 
 let saveT = 0;
 function persist() {
+  if (quiet) return;
   clearTimeout(saveT);
   saveT = setTimeout(() => {
     const d = serialize();
@@ -429,22 +530,36 @@ function persist() {
   }, 250);
 }
 
-const hist = [];
+const hist = [], redoStack = [];
 function checkpoint() {
   hist.push(serialize());
   if (hist.length > 50) hist.shift();
+  redoStack.length = 0;
 }
 
-function undo() {
-  const s = hist.pop();
-  if (s === undefined) return;
+function restoreList(s) {
   const list = deserialize(s) || [];
   rects.length = 0;
   for (const r of list) rects.push(r);
   hover.box = -1; hover.face = 0; hover.mode = ''; drag.on = false;
   canvas.style.cursor = '';
+  clearEntry();
   persist();
   kick();
+}
+
+function undo() {
+  const s = hist.pop();
+  if (s === undefined) return;
+  redoStack.push(serialize());
+  restoreList(s);
+}
+
+function redo() {
+  const s = redoStack.pop();
+  if (s === undefined) return;
+  hist.push(serialize());
+  restoreList(s);
 }
 
 /* ---------- camera: near-ortho fov morph on a real three camera ---------- */
@@ -613,6 +728,188 @@ function applyDrag(cx, cy) {
   else if (drag.bound === 'yhi') r.hi[1] = Math.max(drag.hi0[1] + q, r.lo[1] + GRID);
 }
 
+/* ---------- typed dimensions: the keyboard is the caliper's second jaw ---------- */
+
+const entryActive = () => entry.buf[0] !== '' || entry.buf[1] !== '';
+function entryMode() {
+  if (meas.on) return 'draft';
+  if (drag.on && drag.mode === 'resize') return 'resize';
+  if (!drag.on && tilt.cur > 0.25 && hover.box >= 0 && hover.mode === 'resize') return 'hover';
+  return '';
+}
+function clearEntry() { entry.buf[0] = ''; entry.buf[1] = ''; entry.field = 0; }
+const typed = i => `<span class="typed">${entry.buf[i] || '&nbsp;'}</span>`;
+
+function applyEntry() {
+  const mode = entryMode();
+  if (!mode) return false;
+  const vals = entry.buf.map(s => s === '' ? null : Math.max(GRID, snap(Number(s))));
+  if (mode === 'draft') {
+    if (vals[0] === null && vals[1] === null) return false;
+    const sx = target.x >= meas.ax ? 1 : -1, sy = target.y >= meas.ay ? 1 : -1;
+    const hx = vals[0] === null ? target.x : meas.ax + sx * Math.min(4096, vals[0]);
+    const hy = vals[1] === null ? target.y : meas.ay + sy * Math.min(4096, vals[1]);
+    meas.on = false;
+    commitRect(hx, hy);
+  } else {
+    if (vals[0] === null) return false;
+    const box = mode === 'resize' ? drag.box : hover.box;
+    const r = rects[box];
+    if (!r) return false;
+    const b = mode === 'resize' ? drag.bound : hover.bound;
+    const v = Math.min(b === 'z' ? 640 : 4096, vals[0]);
+    if (mode === 'hover') checkpoint();   // a drag took its checkpoint when it began
+    if (b === 'z')        r.h = v;
+    else if (b === 'xlo') r.lo[0] = r.hi[0] - v;
+    else if (b === 'xhi') r.hi[0] = r.lo[0] + v;
+    else if (b === 'ylo') r.lo[1] = r.hi[1] - v;
+    else                  r.hi[1] = r.lo[1] + v;
+    if (drag.on) { drag.on = false; canvas.style.cursor = ''; }
+    persist();
+  }
+  clearEntry();
+  kick();
+  return true;
+}
+
+// arrow keys slide the hovered volume one grid unit along whichever sheet
+// axis lies closest to the arrow on screen — the same calibration as a resize
+let nudgeT = 0, nudgeBox = -1;
+function nudge(key, big) {
+  if (!(tilt.cur > 0.25) || hover.box < 0 || drag.on) return false;
+  const r = rects[hover.box];
+  const c = [(r.lo[0] + r.hi[0]) / 2, (r.lo[1] + r.hi[1]) / 2, (r.base + r.h) * riseK()];
+  const ax = axisOnScreen(c, [1, 0, 0]), ay = axisOnScreen(c, [0, 1, 0]);
+  if (!ax || !ay) return false;
+  const dir = key === 'ArrowLeft' ? [-1, 0] : key === 'ArrowRight' ? [1, 0] : key === 'ArrowUp' ? [0, -1] : [0, 1];
+  const dx = ax.unit[0] * dir[0] + ax.unit[1] * dir[1];
+  const dy = ay.unit[0] * dir[0] + ay.unit[1] * dir[1];
+  const step = (big ? 8 : 1) * GRID;
+  const t = performance.now();
+  if (t - nudgeT > 600 || nudgeBox !== hover.box) checkpoint();   // one undo step per burst
+  nudgeT = t; nudgeBox = hover.box;
+  if (Math.abs(dx) >= Math.abs(dy)) { const s = Math.sign(dx) * step; r.lo[0] += s; r.hi[0] += s; }
+  else                              { const s = Math.sign(dy) * step; r.lo[1] += s; r.hi[1] += s; }
+  persist();
+  kick();
+  return true;
+}
+
+/* ---------- gap dimensions: clearance to the nearest neighbour while moving ---------- */
+
+let gapsShown = false;
+function gapDims() {
+  if (!(drag.on && drag.mode === 'move')) {
+    if (gapsShown) { gaps.innerHTML = ''; gapsShown = false; }
+    return;
+  }
+  const r = rects[drag.box];
+  const z = r.base * riseK();
+  const best = [null, null];
+  for (let j = 0; j < rects.length; j++) {
+    if (j === drag.box) continue;
+    const s = rects[j];
+    const oy0 = Math.max(r.lo[1], s.lo[1]), oy1 = Math.min(r.hi[1], s.hi[1]);
+    if (oy1 > oy0) {   // in line along x: shares depth with the moved plate
+      let g = null, a = 0, b = 0;
+      if (s.lo[0] >= r.hi[0])      { g = s.lo[0] - r.hi[0]; a = r.hi[0]; b = s.lo[0]; }
+      else if (s.hi[0] <= r.lo[0]) { g = r.lo[0] - s.hi[0]; a = r.lo[0]; b = s.hi[0]; }
+      if (g !== null && g <= 512 && (!best[0] || g < best[0].gap)) best[0] = { gap: g, a, b, m: (oy0 + oy1) / 2 };
+    }
+    const ox0 = Math.max(r.lo[0], s.lo[0]), ox1 = Math.min(r.hi[0], s.hi[0]);
+    if (ox1 > ox0) {
+      let g = null, a = 0, b = 0;
+      if (s.lo[1] >= r.hi[1])      { g = s.lo[1] - r.hi[1]; a = r.hi[1]; b = s.lo[1]; }
+      else if (s.hi[1] <= r.lo[1]) { g = r.lo[1] - s.hi[1]; a = r.lo[1]; b = s.hi[1]; }
+      if (g !== null && g <= 512 && (!best[1] || g < best[1].gap)) best[1] = { gap: g, a, b, m: (ox0 + ox1) / 2 };
+    }
+  }
+  let html = '';
+  for (let axis = 0; axis < 2; axis++) {
+    const g = best[axis];
+    if (!g) continue;
+    const P = (u, v) => axis === 0 ? projectWorld(u, v, z) : projectWorld(v, u, z);
+    const s0 = P(g.a, g.m), s1 = P(g.b, g.m);
+    if (!s0 || !s1) continue;
+    const ticks = [[g.a, g.m - 6], [g.a, g.m + 6], [g.b, g.m - 6], [g.b, g.m + 6]].map(([u, v]) => P(u, v));
+    if (ticks.some(t => !t)) continue;
+    const f = n => n.toFixed(1);
+    const major = g.gap % 64 === 0;   // flush, or a whole number of majors apart
+    const mx = (s0[0] + s1[0]) / 2, my = (s0[1] + s1[1]) / 2;
+    html += `<g class="${major ? 'flush' : ''}">`
+      + `<line x1="${f(s0[0])}" y1="${f(s0[1])}" x2="${f(s1[0])}" y2="${f(s1[1])}"/>`
+      + `<line x1="${f(ticks[0][0])}" y1="${f(ticks[0][1])}" x2="${f(ticks[1][0])}" y2="${f(ticks[1][1])}"/>`
+      + `<line x1="${f(ticks[2][0])}" y1="${f(ticks[2][1])}" x2="${f(ticks[3][0])}" y2="${f(ticks[3][1])}"/>`
+      + `<text x="${f(mx)}" y="${f(my - 7)}" text-anchor="middle">${g.gap}</text></g>`;
+  }
+  gaps.innerHTML = html;
+  gapsShown = true;
+}
+
+/* ---------- light: baked ground shadows, per-volume occluder lists ---------- */
+
+let lastSig = NaN;
+const eff = Array.from({ length: MAXB }, () => ({ lo: [0, 0], hi: [0, 0], eb: 0, eh: 0 }));
+
+function computeOccluders(n) {
+  const sz = SUN[2];
+  for (let i = 0; i < n; i++) {
+    const a = eff[i];
+    const topI = a.eb + a.eh;
+    const list = [];
+    for (let j = 0; j < n; j++) {
+      if (j === i) continue;
+      const b = eff[j];
+      if (b.eh < 0.5) continue;
+      const topJ = b.eb + b.eh;
+      const t1 = (topJ - a.eb) / sz;
+      if (t1 <= 0.001) continue;
+      const t0 = Math.max(0, (b.eb - topI) / sz);
+      if (t0 > t1) continue;
+      // the receiver's footprint, swept up-sun over the reach where j can sit in the way
+      const sx0 = a.lo[0] + Math.min(SUN[0] * t0, SUN[0] * t1), sx1 = a.hi[0] + Math.max(SUN[0] * t0, SUN[0] * t1);
+      const sy0 = a.lo[1] + Math.min(SUN[1] * t0, SUN[1] * t1), sy1 = a.hi[1] + Math.max(SUN[1] * t0, SUN[1] * t1);
+      const w = 5 + t1 * 0.16;   // penumbra margin
+      if (sx1 < b.lo[0] - w || sx0 > b.hi[0] + w || sy1 < b.lo[1] - w || sy0 > b.hi[1] + w) continue;
+      const dx = (a.lo[0] + a.hi[0] - b.lo[0] - b.hi[0]) / 2, dy = (a.lo[1] + a.hi[1] - b.lo[1] - b.hi[1]) / 2;
+      list.push([j, dx * dx + dy * dy]);
+    }
+    if (list.length > OCC) list.sort((p, q) => p[1] - q[1]);
+    const u = boxes[i].material.uniforms;
+    const k = Math.min(OCC, list.length);
+    for (let m = 0; m < k; m++) u.uOcc.value[m] = list[m][0];
+    u.uOccN.value = k;
+  }
+}
+
+function bakeShadows(n) {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, any = false;
+  for (let i = 0; i < n; i++) {
+    const a = eff[i];
+    if (a.eh < 0.5) continue;
+    any = true;
+    const t1 = (a.eb + a.eh) / SUN[2];
+    const reach = 5 + t1 * 0.16 + 16;   // penumbra plus the contact halo
+    x0 = Math.min(x0, a.lo[0] - reach); y0 = Math.min(y0, a.lo[1] - reach);
+    x1 = Math.max(x1, a.hi[0] - SUN[0] * t1 + reach); y1 = Math.max(y1, a.hi[1] - SUN[1] * t1 + reach);
+  }
+  const gu = groundMat.uniforms;
+  if (!any) { gu.uShOn.value = 0; return; }
+  // a coarse lattice keeps the target from reallocating on every frame of a drag
+  x0 = Math.floor(x0 / 128) * 128; y0 = Math.floor(y0 / 128) * 128;
+  x1 = Math.ceil(x1 / 128) * 128;  y1 = Math.ceil(y1 / 128) * 128;
+  const ex = x1 - x0, ey = y1 - y0;
+  const tpu = Math.min(2, 2048 / Math.max(ex, ey));   // texels per sheet unit
+  const sx = Math.min(2048, Math.ceil(ex * tpu)), sy = Math.min(2048, Math.ceil(ey * tpu));
+  if (shadowRT.width !== sx || shadowRT.height !== sy) shadowRT.setSize(sx, sy);
+  bakeMat.uniforms.uExt.value.set(x0, y0, ex, ey);
+  gu.uShExt.value.set(x0, y0, ex, ey);
+  gu.uShOn.value = 1;
+  renderer.setRenderTarget(shadowRT);
+  renderer.render(bakeScene, bakeCam);
+  renderer.setRenderTarget(null);
+}
+
 /* ---------- frame loop (render-on-demand) ---------- */
 
 function resize() {
@@ -642,11 +939,11 @@ function render(force, t = performance.now()) {
 
   computeBases();
   const rk = riseK();
-  let growing = false;
+  let growing = false, sig = 0;
   for (let i = 0; i < MAXB; i++) {
     const m = boxes[i];
     const r = rects[i];
-    if (!r) { m.visible = false; boxArrays.uBH.value[i] = 0; continue; }
+    if (!r) { m.visible = false; continue; }
     let be = 1;
     if (r.born) {
       const g = (t - r.born) / 350;
@@ -662,12 +959,21 @@ function render(force, t = performance.now()) {
     m.material.uniforms.uHi.value.set(r.hi[0], r.hi[1], eb + eh);
     m.material.uniforms.uHovOn.value = (tilt.cur > 0.25 && hover.box === i) ? 1 : 0;
     m.material.uniforms.uHovFace.value = (hover.box === i && hover.mode === 'move') ? hover.face : 0;
-    boxArrays.uBLo.value[i].set(r.lo[0], r.lo[1]);
-    boxArrays.uBHi.value[i].set(r.hi[0], r.hi[1]);
-    boxArrays.uBB.value[i] = eb;
-    boxArrays.uBH.value[i] = eh;
+    const e = eff[i];
+    e.lo[0] = r.lo[0]; e.lo[1] = r.lo[1]; e.hi[0] = r.hi[0]; e.hi[1] = r.hi[1]; e.eb = eb; e.eh = eh;
+    boxData[i * 4] = r.lo[0]; boxData[i * 4 + 1] = r.lo[1]; boxData[i * 4 + 2] = r.hi[0]; boxData[i * 4 + 3] = r.hi[1];
+    boxData[(MAXB + i) * 4] = eb; boxData[(MAXB + i) * 4 + 1] = eh;
+    sig += (i + 1) * (r.lo[0] * 1.1 + r.lo[1] * 2.3 + r.hi[0] * 3.7 + r.hi[1] * 5.1 + eb * 7.3 + eh * 9.7);
   }
-  boxArrays.uN.value = rects.length;
+  const n = rects.length;
+  shared.uN.value = n;
+  sig += n * 1e6;
+  if (sig !== lastSig) {   // the model changed: re-upload it, relight it
+    lastSig = sig;
+    boxTex.needsUpdate = true;
+    computeOccluders(n);
+    bakeShadows(n);
+  }
 
   const gu = groundMat.uniforms;
   gu.uRaw.value.set(raw.x, raw.y);
@@ -686,9 +992,11 @@ function render(force, t = performance.now()) {
   // DOM readout + dimension labels
   const m2 = meas.on;
   const rs = projectWorld(cur.x, cur.y, 0);
-  readout.textContent = m2
-    ? `w: ${Math.abs(Math.round(target.x - meas.ax))} · h: ${Math.abs(Math.round(target.y - meas.ay))}`
-    : `x: ${Math.round(target.x)} · y: ${Math.round(target.y)}`;
+  if (m2) {
+    const wv = Math.abs(Math.round(target.x - meas.ax)), hv = Math.abs(Math.round(target.y - meas.ay));
+    if (entryActive()) readout.innerHTML = `w: ${(entry.buf[0] || entry.field === 0) ? typed(0) : wv} · h: ${(entry.buf[1] || entry.field === 1) ? typed(1) : hv}`;
+    else readout.textContent = `w: ${wv} · h: ${hv}`;
+  } else readout.textContent = `x: ${Math.round(target.x)} · y: ${Math.round(target.y)}`;
   if (rs) readout.style.transform = `translate(${Math.round(rs[0]) + 14}px, ${Math.round(rs[1]) + 16}px)`;
   readout.style.opacity = m2 ? '1'
     : (tilt.cur < 0.2 && energy > 0.03) ? String(Math.min(1, energy * 1.6)) : '0';
@@ -697,19 +1005,30 @@ function render(force, t = performance.now()) {
   if (hb) {
     const eh = hb.h * riseK(), eb = hb.base * riseK();
     const cxm = (hb.lo[0] + hb.hi[0]) / 2, cym = (hb.lo[1] + hb.hi[1]) / 2;
-    place(dw, `w: ${Math.round(hb.hi[0] - hb.lo[0])}`, projectWorld(cxm, hb.lo[1], eb), -18, 14);
-    place(dh, `h: ${Math.round(hb.hi[1] - hb.lo[1])}`, projectWorld(hb.hi[0], cym, eb), 12, 0);
-    place(dz, `z: ${Math.round(hb.h)}`, projectWorld(hb.lo[0], hb.lo[1], eb + eh / 2), -56, -6);
+    const em = entryMode();
+    const tb = (entryActive() && (em === 'resize' || em === 'hover')) ? (em === 'resize' ? drag.bound : hover.bound) : '';
+    const lab = (b, key, v) => tb && (tb === 'z' ? b === 'z' : tb[0] === b) ? [`${key}: ${typed(0)}`, true] : [`${key}: ${v}`, false];
+    const [tw, hw] = lab('x', 'w', Math.round(hb.hi[0] - hb.lo[0]));
+    const [th, hh] = lab('y', 'h', Math.round(hb.hi[1] - hb.lo[1]));
+    const [tz, hz] = lab('z', 'z', Math.round(hb.h));
+    place(dw, tw, projectWorld(cxm, hb.lo[1], eb), -18, 14, hw);
+    place(dh, th, projectWorld(hb.hi[0], cym, eb), 12, 0, hh);
+    // a move is about clearance, not height: the gap dimensions take the corner
+    place(dz, tz, (drag.on && drag.mode === 'move') ? null : projectWorld(hb.lo[0], hb.lo[1], eb + eh / 2), -56, -6, hz);
   } else {
     dw.style.opacity = dh.style.opacity = dz.style.opacity = '0';
   }
+  gapDims();
 
   const tilted = tilt.cur > 0.25;
-  if (tilted !== hintTilted) {
+  if (hintOverride !== null) {   // the demo narrates through the same line
+    if (hint.innerHTML !== hintOverride) hint.innerHTML = hintOverride;
+    hintTilted = null;
+  } else if (tilted !== hintTilted) {
     hintTilted = tilted;
     hint.innerHTML = tilted
-      ? '<em>click&ndash;click</em> drafts &nbsp;&middot;&nbsp; <em>faces</em> move &nbsp;&middot;&nbsp; <em>lines</em> resize &nbsp;&middot;&nbsp; <em>swipe</em> orbits &nbsp;&middot;&nbsp; <em>pinch</em> zooms &nbsp;&middot;&nbsp; <em>backspace</em> deletes &nbsp;&middot;&nbsp; <em>esc</em> flattens'
-      : '<em>click&ndash;click</em> to draft &nbsp;&middot;&nbsp; <em>scroll</em> to tilt &nbsp;&middot;&nbsp; <em>pinch</em> to zoom &nbsp;&middot;&nbsp; <em>&#8984;z</em> undoes &nbsp;&middot;&nbsp; <em>url</em> is a share link';
+      ? '<em>click&ndash;click</em> drafts &nbsp;&middot;&nbsp; <em>faces</em> move &nbsp;&middot;&nbsp; <em>lines</em> resize &nbsp;&middot;&nbsp; <em>type</em> a size &nbsp;&middot;&nbsp; <em>arrows</em> nudge &nbsp;&middot;&nbsp; <em>swipe</em> orbits &nbsp;&middot;&nbsp; <em>backspace</em> deletes &nbsp;&middot;&nbsp; <em>esc</em> flattens'
+      : '<em>click&ndash;click</em> to draft &nbsp;&middot;&nbsp; <em>type</em> w &times; h &nbsp;&middot;&nbsp; <em>scroll</em> to tilt &nbsp;&middot;&nbsp; <em>pinch</em> to zoom &nbsp;&middot;&nbsp; <em>&#8984;z</em> undoes &nbsp;&middot;&nbsp; <em>url</em> is a share link';
   }
 
   const settled = Math.abs(cur.x - target.x) < 0.05 && Math.abs(cur.y - target.y) < 0.05;
@@ -742,6 +1061,7 @@ addEventListener('pointermove', e => {
   }
   if (tilt.cur > 0.25) {
     const pk = pick(e.clientX, e.clientY);
+    if (pk.box !== hover.box || pk.bound !== hover.bound) clearEntry();
     hover.box = pk.box; hover.mode = pk.mode; hover.bound = pk.bound;
     hover.face = pk.mode === 'move' ? pk.face : 0;
     canvas.style.cursor = pk.box < 0 ? ''
@@ -757,6 +1077,7 @@ addEventListener('pointermove', e => {
 
 addEventListener('pointerdown', e => {
   if (e.target.closest && e.target.closest('a, button, select, input')) return;
+  clearEntry();
   if (tilt.cur > 0.25) {
     const w = pointerToWorld(e.clientX, e.clientY);
     if (meas.on) {
@@ -793,6 +1114,7 @@ addEventListener('pointerdown', e => {
 addEventListener('pointerup', () => {
   if (drag.on) {
     drag.on = false;
+    clearEntry();
     canvas.style.cursor = hover.box >= 0 ? 'grab' : '';
     persist();
     kick();
@@ -813,12 +1135,37 @@ addEventListener('wheel', e => {
 }, { passive: false });
 
 addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
-    e.preventDefault();
-    undo();
+  if (e.metaKey || e.ctrlKey) {
+    if (e.key === 'z' || e.key === 'Z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
     return;
   }
-  if ((e.key === 'Backspace' || e.key === 'Delete') && tilt.cur > 0.25 && hover.box >= 0) {
+  const mode = entryMode();
+  if (mode) {
+    if (/^[0-9]$/.test(e.key)) {
+      if (entry.buf[entry.field].length < 4) entry.buf[entry.field] += e.key;
+      kick();
+      return;
+    }
+    if (mode === 'draft' && (e.key === 'x' || e.key === 'X' || e.key === ',' || e.key === ' ' || e.key === 'Tab')) {
+      e.preventDefault();
+      entry.field = 1;
+      kick();
+      return;
+    }
+    if (e.key === 'Enter') { e.preventDefault(); applyEntry(); return; }
+    if (e.key === 'Backspace' && entryActive()) {
+      if (entry.field === 1 && entry.buf[1] === '') entry.field = 0;
+      entry.buf[entry.field] = entry.buf[entry.field].slice(0, -1);
+      kick();
+      return;
+    }
+    if (e.key === 'Escape' && entryActive()) { clearEntry(); kick(); return; }
+  }
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    if (nudge(e.key, e.shiftKey)) e.preventDefault();
+    return;
+  }
+  if ((e.key === 'Backspace' || e.key === 'Delete') && tilt.cur > 0.25 && hover.box >= 0 && !drag.on) {
     checkpoint();
     rects.splice(hover.box, 1);
     hover.box = -1; hover.face = 0; drag.on = false;
@@ -841,9 +1188,10 @@ document.addEventListener('visibilitychange', () => {
 addEventListener('resize', resize);
 
 // restore a shared link, else last session's drawing
-(() => {
+const fromLink = (() => {
   const dm = location.hash.match(/d=([^&]*)/);
   let list = dm && deserialize(decodeURIComponent(dm[1]));
+  const linked = !!(list && list.length);
   if (!list) { try { list = deserialize(localStorage.getItem(STORE_KEY)); } catch (e) { /* ignore */ } }
   if (list && list.length) for (const r of list) rects.push(r);
   const vm = location.hash.match(/v=([^&]+)/);
@@ -853,15 +1201,45 @@ addEventListener('resize', resize);
     if (Number.isFinite(o)) orbit.tgt = o;
     if (Number.isFinite(z)) zoom.tgt = Math.max(0.45, Math.min(2.4, z));
   }
+  return linked;
 })();
 
 resize();
 kick();
 
-// verification hooks (harmless in normal use)
+// the table's public face: the in-page demo (demo/drive.js) and the
+// verification harness drive it through here
+window.__table = {
+  canvas,
+  fromLink,
+  empty: () => rects.length === 0,
+  size: () => [W, H],
+  project: projectWorld,
+  ground: pointerToWorld,
+  state: () => ({
+    tilt: tilt.cur, tiltTgt: tilt.tgt, zoom: zoom.cur, orbit: orbit.cur, orbitTgt: orbit.tgt, meas: meas.on,
+    hover: { ...hover },
+    drag: { on: drag.on, box: drag.box, mode: drag.mode, bound: drag.bound, unit: drag.unit.slice(), perUnit: drag.perUnit, sx: drag.sx, sy: drag.sy },
+    entry: { buf: entry.buf.slice(), field: entry.field },
+    rects: rects.map(r => ({ lo: r.lo.slice(), hi: r.hi.slice(), h: r.h, base: r.base || 0 })),
+    undo: hist.length, redo: redoStack.length,
+  }),
+  snapshot: () => ({ d: serialize(), v: [tilt.tgt, orbit.tgt, zoom.tgt], hist: hist.slice(), redo: redoStack.slice() }),
+  restore: s => {
+    hist.length = 0; hist.push(...s.hist);
+    redoStack.length = 0; redoStack.push(...s.redo);
+    tilt.tgt = s.v[0]; orbit.tgt = s.v[1]; zoom.tgt = s.v[2];
+    restoreList(s.d);
+  },
+  clear: () => { rects.length = 0; hover.box = -1; hover.face = 0; hover.mode = ''; drag.on = false; meas.on = false; canvas.style.cursor = ''; kick(); },
+  resetView: () => { tilt.tgt = 0; orbit.tgt = 0; zoom.tgt = 1; kick(); },
+  quiet: v => { quiet = !!v; },
+  hint: t => { hintOverride = t; kick(); },
+  kick,
+};
 window.__project = projectWorld;
-window.__tstate = () => ({ tilt: tilt.cur, zoom: zoom.cur, orbit: orbit.cur, hover: { ...hover },
-  rects: rects.map(r => ({ lo: r.lo.slice(), hi: r.hi.slice(), h: r.h, base: r.base || 0 })) });
+window.__tstate = () => window.__table.state();
 </script>
+<script type="module" src="demo/drive.js"></script>
 </body>
 </html>

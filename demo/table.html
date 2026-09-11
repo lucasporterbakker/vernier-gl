@@ -35,6 +35,19 @@
     color: var(--ac); font-size: 11px; white-space: nowrap;
     opacity: 0; will-change: transform;
   }
+  .typed { color: var(--fg); border-bottom: 1px solid var(--ac); padding-bottom: 1px; }
+  #gaps { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 2; pointer-events: none; overflow: visible; }
+  #gaps line { stroke: var(--ac); stroke-width: 1; opacity: 0.8; }
+  #gaps text { fill: var(--ac); font: 11px 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #gaps .flush line { stroke: var(--fg); opacity: 1; }
+  #gaps .flush text { fill: var(--fg); }
+  #play {
+    position: fixed; right: 22px; bottom: 12px; z-index: 3;
+    background: none; border: 0; padding: 4px 0; margin: 0;
+    color: var(--fg1); font: inherit; font-size: 11px; letter-spacing: 0.02em;
+    cursor: pointer; opacity: 0.85;
+  }
+  #play:hover { color: var(--fg); opacity: 1; }
 </style>
 </head>
 <body>
@@ -45,15 +58,21 @@
 <div class="dim" id="dw" aria-hidden="true"></div>
 <div class="dim" id="dh" aria-hidden="true"></div>
 <div class="dim" id="dz" aria-hidden="true"></div>
+<svg id="gaps" aria-hidden="true"></svg>
+<button id="play" type="button" aria-label="watch a demo">&#9654; watch</button>
 
 <script type="module">
-/* vernier — drafting table spike.
+/* vernier — drafting table, the zero-dependency edition.
    Plan mode is the vernier grid: snap, measure, release — but rects persist
    as your plan. Scroll tips the sheet into perspective (ortho collapses into
    a real camera) and the plan rises into hairline wireframe volumes,
-   analytically raytraced in one fragment shader. Esc flattens. */
+   analytically raytraced in one fragment shader. Esc flattens.
+   The model reaches the shader as a tiny float texture, so the cap is a
+   number, not a uniform budget; light stays fully analytic per pixel here
+   (the three.js edition bakes the ground's shadows and trims each volume's
+   occluders — this one keeps the single-shader purity and pays per pixel). */
 
-const MAXB = 16;
+const MAXB = 64;
 
 const VERT = `#version 300 es
 void main() {
@@ -77,14 +96,14 @@ uniform float uEnergy;
 uniform float uPulse;
 uniform vec4  uMeas;      // active rect: lo.xy, hi.xy (world)
 uniform float uMeasA;
-uniform vec2  uBoxLo[${MAXB}];
-uniform vec2  uBoxHi[${MAXB}];
-uniform float uBoxH[${MAXB}];
-uniform float uBoxB[${MAXB}];  // base elevation: stacked blocks rest on what's below
+uniform highp sampler2D uBoxTex;   // texel (i,0) = lo.xy hi.xy, (i,1) = base, height
 uniform int   uNBox;
 uniform int   uHoverBox;   // -1 none
 uniform int   uHoverFace;  // 1 top, 2 x-, 3 x+, 4 y-, 5 y+
 uniform vec3  uBg, uLine, uAc;
+
+vec4 boxXY(int i) { return texelFetch(uBoxTex, ivec2(i, 0), 0); }
+vec2 boxZ(int i)  { return texelFetch(uBoxTex, ivec2(i, 1), 0).xy; }
 
 // screen-px antialiased line: d = world distance, fw = its screen footprint
 float lineAA(float d, float fw) { return 1.0 - smoothstep(0.5, 1.5, d / max(fw, 1e-6)); }
@@ -105,12 +124,32 @@ float boxShadow(vec3 p, vec3 blo, vec3 bhi) {
   return mix(0.45, 1.0, smoothstep(-0.25 * w, w, d));
 }
 
+// contact occlusion where a plate rests on a receiver: the ground, or a top face
+float contactAO(vec2 p, vec2 lo, vec2 hi) {
+  vec2 d = max(lo - p, p - hi);
+  return 0.80 + 0.20 * smoothstep(0.0, 16.0, max(d.x, d.y));
+}
+
 // grid line mask at spacing s for world coords q (fw = per-axis footprint)
 float gridAA(vec2 q, float s, vec2 fw, out float moire) {
   vec2 g = abs(q / s - round(q / s)) * s;
   vec2 a = g / max(fw, vec2(1e-6));
   moire = smoothstep(2.5, 5.0, s / max(fw.x, fw.y)); // fade before cells alias
   return (1.0 - smoothstep(0.5, 1.5, min(a.x, a.y))) * moire;
+}
+
+// rulers: the pane's edges are scales — a tick every minor, a longer one every major
+float rulers(vec2 p, vec2 lo, vec2 hi, vec2 fw) {
+  vec2 gmin = abs(p / 8.0 - round(p / 8.0)) * 8.0;
+  vec2 gmaj = abs(p / 64.0 - round(p / 64.0)) * 64.0;
+  vec2 len = mix(vec2(3.0), vec2(6.0), step(gmaj, vec2(0.5)));
+  float nearX = step(lo.y, p.y) * step(p.y, lo.y + len.x) + step(hi.y - len.x, p.y) * step(p.y, hi.y);
+  float nearY = step(lo.x, p.x) * step(p.x, lo.x + len.y) + step(hi.x - len.y, p.x) * step(p.x, hi.x);
+  float inX = step(lo.x, p.x) * step(p.x, hi.x), inY = step(lo.y, p.y) * step(p.y, hi.y);
+  float tx = lineAA(gmin.x, fw.x) * min(nearX, 1.0) * inX;
+  float ty = lineAA(gmin.y, fw.y) * min(nearY, 1.0) * inY;
+  float moire = smoothstep(2.5, 5.0, 8.0 / max(fw.x, fw.y));
+  return max(tx, ty) * moire;
 }
 
 void main() {
@@ -127,11 +166,12 @@ void main() {
   // nearest hit: ground plane z=0, then each box
   float t = 1e9; int mat = -1; int bi = -1; vec3 n = vec3(0.0, 0.0, 1.0);
   if (rd.z < 0.0) { t = -ro.z / rd.z; mat = 0; }
-  for (int i = 0; i < ${MAXB}; i++) {
-    if (i >= uNBox) break;
-    if (uBoxH[i] < 0.5) continue;   // flat plans render as footprints on the sheet
-    vec3 blo = vec3(uBoxLo[i], uBoxB[i]), bhi = vec3(uBoxHi[i], uBoxB[i] + uBoxH[i]);
-    vec3 inv = 1.0 / rd;
+  vec3 inv = 1.0 / rd;
+  for (int i = 0; i < uNBox; i++) {
+    vec2 z = boxZ(i);
+    if (z.y < 0.5) continue;   // flat plans render as footprints on the sheet
+    vec4 b = boxXY(i);
+    vec3 blo = vec3(b.xy, z.x), bhi = vec3(b.zw, z.x + z.y);
     vec3 t0 = (blo - ro) * inv, t1 = (bhi - ro) * inv;
     vec3 tmin = min(t0, t1), tmax = max(t0, t1);
     float tn = max(max(tmin.x, tmin.y), tmin.z);
@@ -180,28 +220,28 @@ void main() {
     float ring = (1.0 - smoothstep(0.5, 1.5, abs(boxd - 7.0))) * uEnergy;
     float inner = 1.0 - smoothstep(5.5, 7.0, boxd);
 
-    // active measurement pane: border + edge glow
+    // active measurement pane: border, rulers, edge glow
     float ex = min(abs(p.x - lo.x), abs(p.x - hi.x));
     float ey = min(abs(p.y - lo.y), abs(p.y - hi.y));
     float inX = step(lo.x - 4.0, p.x) * step(p.x, hi.x + 4.0);
     float inY = step(lo.y - 4.0, p.y) * step(p.y, hi.y + 4.0);
     float mBorder = max(lineAA(ex, fwXY.x) * inY * step(lo.y, p.y) * step(p.y, hi.y),
                         lineAA(ey, fwXY.y) * inX * step(lo.x, p.x) * step(p.x, hi.x)) * uMeasA;
+    float mRuler = rulers(p.xy, lo, hi, fwXY) * uMeasA;
     float edgeIn = max(min(min(p.x - lo.x, hi.x - p.x), min(p.y - lo.y, hi.y - p.y)), 0.0);
     float glow = exp(-edgeIn / 16.0) * glass;
 
     // drafted footprints stay inked on the sheet — but the ink of an
     // elevated block leaves the ground as the sheet tilts
     float fpB = 0.0, fpF = 0.0;
-    for (int i = 0; i < ${MAXB}; i++) {
-      if (i >= uNBox) break;
-      float ink = uBoxB[i] < 0.5 ? 1.0 : uOrthoK;
+    for (int i = 0; i < uNBox; i++) {
+      float ink = boxZ(i).x < 0.5 ? 1.0 : uOrthoK;
       if (ink < 0.01) continue;
-      vec2 l2 = uBoxLo[i], h2 = uBoxHi[i];
-      float iX = step(l2.x, p.x) * step(p.x, h2.x);
-      float iY = step(l2.y, p.y) * step(p.y, h2.y);
-      float ex2 = min(abs(p.x - l2.x), abs(p.x - h2.x));
-      float ey2 = min(abs(p.y - l2.y), abs(p.y - h2.y));
+      vec4 b = boxXY(i);
+      float iX = step(b.x, p.x) * step(p.x, b.z);
+      float iY = step(b.y, p.y) * step(p.y, b.w);
+      float ex2 = min(abs(p.x - b.x), abs(p.x - b.z));
+      float ey2 = min(abs(p.y - b.y), abs(p.y - b.w));
       fpB = max(fpB, max(lineAA(ex2, fwXY.x) * iY, lineAA(ey2, fwXY.y) * iX) * ink);
       fpF = max(fpF, iX * iY * ink);
     }
@@ -217,31 +257,31 @@ void main() {
 
     // ...as soft shadows and contact occlusion from the volumes
     float sh = 1.0, ao = 1.0;
-    for (int i = 0; i < ${MAXB}; i++) {
-      if (i >= uNBox) break;
-      if (uBoxH[i] < 0.5) continue;
-      sh = min(sh, boxShadow(p, vec3(uBoxLo[i], uBoxB[i]), vec3(uBoxHi[i], uBoxB[i] + uBoxH[i])));
-      if (uBoxB[i] < 0.5) {
-        vec2 dc2 = max(uBoxLo[i] - p.xy, p.xy - uBoxHi[i]);
-        ao *= 0.80 + 0.20 * smoothstep(0.0, 16.0, max(dc2.x, dc2.y));
-      }
+    for (int i = 0; i < uNBox; i++) {
+      vec2 z = boxZ(i);
+      if (z.y < 0.5) continue;
+      vec4 b = boxXY(i);
+      sh = min(sh, boxShadow(p, vec3(b.xy, z.x), vec3(b.zw, z.x + z.y)));
+      if (z.x < 0.5) ao *= contactAO(p.xy, b.xy, b.zw);
     }
     col *= mix(1.0, sh, 0.88) * ao;
 
     // instrument chrome stays above the light
     col += uLine * cross * (1.0 - inner);
     col += uAc * mBorder * 0.55;
+    col += uAc * mRuler * 0.50;
     col += uAc * ring * uPulse;
   } else {
     // ---- a drafted volume: graph paper wrapped around a box ----
-    vec2 lo = uBoxLo[bi], hi = uBoxHi[bi];
-    float h = uBoxH[bi];
+    vec4 bb = boxXY(bi); vec2 bz = boxZ(bi);
+    vec2 lo = bb.xy, hi = bb.zw;
+    float base = bz.x, h = bz.y, top = base + h;
 
     // face-local 2D coords + their screen footprints
     vec2 q, fq; float e1, e2, f1, f2;
     if (abs(n.z) > 0.5)      { q = p.xy; fq = fwXY; e1 = min(p.x - lo.x, hi.x - p.x); f1 = fwXY.x; e2 = min(p.y - lo.y, hi.y - p.y); f2 = fwXY.y; }
-    else if (abs(n.x) > 0.5) { q = vec2(p.y, p.z); fq = vec2(fwXY.y, fwZ); e1 = min(p.y - lo.y, hi.y - p.y); f1 = fwXY.y; e2 = min(p.z - uBoxB[bi], uBoxB[bi] + h - p.z); f2 = fwZ; }
-    else                     { q = vec2(p.x, p.z); fq = vec2(fwXY.x, fwZ); e1 = min(p.x - lo.x, hi.x - p.x); f1 = fwXY.x; e2 = min(p.z - uBoxB[bi], uBoxB[bi] + h - p.z); f2 = fwZ; }
+    else if (abs(n.x) > 0.5) { q = vec2(p.y, p.z); fq = vec2(fwXY.y, fwZ); e1 = min(p.y - lo.y, hi.y - p.y); f1 = fwXY.y; e2 = min(p.z - base, top - p.z); f2 = fwZ; }
+    else                     { q = vec2(p.x, p.z); fq = vec2(fwXY.x, fwZ); e1 = min(p.x - lo.x, hi.x - p.x); f1 = fwXY.x; e2 = min(p.z - base, top - p.z); f2 = fwZ; }
 
     // faces keep the drafting grid, toned by orientation
     float m1, m2;
@@ -256,16 +296,20 @@ void main() {
     float hov = (bi == uHoverBox) ? 1.0 : 0.0;
     float hovFace = (bi == uHoverBox && faceId == uHoverFace) ? 1.0 : 0.0;
 
-    // faces take the sun: lambert tone + soft shadows from the other volumes
+    // faces take the sun: lambert tone, soft shadows from the other volumes,
+    // and a plate resting on a top face shades the paper under it
     float lam = 0.35 + 0.65 * max(dot(n, SUN), 0.0);
-    float sh = 1.0;
-    for (int i = 0; i < ${MAXB}; i++) {
-      if (i >= uNBox) break;
-      if (i == bi || uBoxH[i] < 0.5) continue;
-      sh = min(sh, boxShadow(p + n * 0.5, vec3(uBoxLo[i], uBoxB[i]), vec3(uBoxHi[i], uBoxB[i] + uBoxH[i])));
+    float sh = 1.0, ao = 1.0;
+    for (int i = 0; i < uNBox; i++) {
+      if (i == bi) continue;
+      vec2 z = boxZ(i);
+      if (z.y < 0.5) continue;
+      vec4 b = boxXY(i);
+      sh = min(sh, boxShadow(p + n * 0.5, vec3(b.xy, z.x), vec3(b.zw, z.x + z.y)));
+      if (n.z > 0.5 && abs(z.x - top) < 1.0) ao *= contactAO(p.xy, b.xy, b.zw);
     }
     vec3 fcol = uBg * 0.35 + uLine * (minor + major) * fade + uAc * abs(n.z) * 0.020;
-    col += fcol * lam * mix(1.0, sh, 0.85);
+    col += fcol * lam * mix(1.0, sh, 0.85) * ao;
 
     // drafting ink stays crisp above the light
     col += uAc * hovFace * 0.045;
@@ -296,13 +340,25 @@ gl.useProgram(prog);
 
 const U = {};
 for (const n of ['uRes','uDpr','uEye','uFwd','uRight','uUp','uHalf','uTan','uOrthoK','uRawW','uCrossW',
-                 'uEnergy','uPulse','uMeas','uMeasA','uBoxLo','uBoxHi','uBoxH','uBoxB','uNBox','uHoverBox','uHoverFace','uBg','uLine','uAc'])
+                 'uEnergy','uPulse','uMeas','uMeasA','uBoxTex','uNBox','uHoverBox','uHoverFace','uBg','uLine','uAc'])
   U[n] = gl.getUniformLocation(prog, n);
 
 const hex01 = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
 gl.uniform3fv(U.uBg, hex01('#0e0f15'));
 gl.uniform3fv(U.uLine, hex01('#58a6ff'));
 gl.uniform3fv(U.uAc, hex01('#a9c1fa'));
+
+// the model rides in a 64×2 float texture: row 0 = footprints, row 1 = base, height
+const boxData = new Float32Array(MAXB * 2 * 4);
+const boxTex = gl.createTexture();
+gl.activeTexture(gl.TEXTURE0);
+gl.bindTexture(gl.TEXTURE_2D, boxTex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, MAXB, 2, 0, gl.RGBA, gl.FLOAT, boxData);
+gl.uniform1i(U.uBoxTex, 0);
 
 /* ---------- state ---------- */
 
@@ -319,11 +375,7 @@ const tilt = { cur: 0, tgt: 0 };
 const zoom = { cur: 1, tgt: 1 };   // pinch: pull back as the block grows
 const orbit = { cur: 0, tgt: 0 };  // sideways scroll: walk around the model
 const rects = [];                     // {lo:[x,y], hi:[x,y], h}
-
-const boxLo = new Float32Array(MAXB * 2);
-const boxHi = new Float32Array(MAXB * 2);
-const boxH = new Float32Array(MAXB);
-const boxB = new Float32Array(MAXB);
+const entry = { buf: ['', ''], field: 0 };   // a typed dimension, mid-gesture
 
 // drafting order is build order: a rect resting on earlier footprints
 // stacks on top of them — and rides along when what's below changes
@@ -358,6 +410,7 @@ function commitRect(hx, hy) {
 /* ---------- share links, undo, persistence ---------- */
 
 const STORE_KEY = 'vernier-table';
+let quiet = false;   // the in-page demo draws without touching the address bar or storage
 
 // the whole drawing as grid-unit integers: "x.y.w.h.z" per box, "_"-joined
 function serialize() {
@@ -384,6 +437,7 @@ function deserialize(s) {
 // the address bar is the share link; localStorage keeps it across reloads
 let saveT = 0;
 function persist() {
+  if (quiet) return;
   clearTimeout(saveT);
   saveT = setTimeout(() => {
     const d = serialize();
@@ -393,33 +447,48 @@ function persist() {
   }, 250);
 }
 
-const hist = [];
+const hist = [], redoStack = [];
 function checkpoint() {
   hist.push(serialize());
   if (hist.length > 50) hist.shift();
+  redoStack.length = 0;
 }
 
-function undo() {
-  const s = hist.pop();
-  if (s === undefined) return;
+function restoreList(s) {
   const list = deserialize(s) || [];
   rects.length = 0;
   for (const r of list) rects.push(r);
   hover.box = -1; hover.face = 0; hover.mode = ''; drag.on = false;
   canvas.style.cursor = '';
+  clearEntry();
   persist();
   kick();
 }
 
+function undo() {
+  const s = hist.pop();
+  if (s === undefined) return;
+  redoStack.push(serialize());
+  restoreList(s);
+}
+
+function redo() {
+  const s = redoStack.pop();
+  if (s === undefined) return;
+  hist.push(serialize());
+  restoreList(s);
+}
+
 const readout = document.getElementById('readout');
 const dw = document.getElementById('dw'), dh = document.getElementById('dh'), dz = document.getElementById('dz');
+const gaps = document.getElementById('gaps');
 const hint = document.getElementById('hint');
-let hintTilted = false;
+let hintTilted = false, hintOverride = null;
 const snap = v => Math.round(v / GRID) * GRID;
 
-function place(el, text, s, ox, oy) {
+function place(el, text, s, ox, oy, html) {
   if (!s) { el.style.opacity = '0'; return; }
-  el.textContent = text;
+  if (html) el.innerHTML = text; else el.textContent = text;
   el.style.transform = `translate(${Math.round(s[0] + ox)}px, ${Math.round(s[1] + oy)}px)`;
   el.style.opacity = '0.95';
 }
@@ -598,6 +667,124 @@ function applyDrag(cx, cy) {
   else if (drag.bound === 'yhi') r.hi[1] = Math.max(drag.hi0[1] + q, r.lo[1] + GRID);
 }
 
+/* ---------- typed dimensions: the keyboard is the caliper's second jaw ---------- */
+
+const entryActive = () => entry.buf[0] !== '' || entry.buf[1] !== '';
+function entryMode() {
+  if (meas.on) return 'draft';
+  if (drag.on && drag.mode === 'resize') return 'resize';
+  if (!drag.on && tilt.cur > 0.25 && hover.box >= 0 && hover.mode === 'resize') return 'hover';
+  return '';
+}
+function clearEntry() { entry.buf[0] = ''; entry.buf[1] = ''; entry.field = 0; }
+const typed = i => `<span class="typed">${entry.buf[i] || '&nbsp;'}</span>`;
+
+function applyEntry() {
+  const mode = entryMode();
+  if (!mode) return false;
+  const vals = entry.buf.map(s => s === '' ? null : Math.max(GRID, snap(Number(s))));
+  if (mode === 'draft') {
+    if (vals[0] === null && vals[1] === null) return false;
+    const sx = target.x >= meas.ax ? 1 : -1, sy = target.y >= meas.ay ? 1 : -1;
+    const hx = vals[0] === null ? target.x : meas.ax + sx * Math.min(4096, vals[0]);
+    const hy = vals[1] === null ? target.y : meas.ay + sy * Math.min(4096, vals[1]);
+    meas.on = false;
+    commitRect(hx, hy);
+  } else {
+    if (vals[0] === null) return false;
+    const box = mode === 'resize' ? drag.box : hover.box;
+    const r = rects[box];
+    if (!r) return false;
+    const b = mode === 'resize' ? drag.bound : hover.bound;
+    const v = Math.min(b === 'z' ? 640 : 4096, vals[0]);
+    if (mode === 'hover') checkpoint();   // a drag took its checkpoint when it began
+    if (b === 'z')        r.h = v;
+    else if (b === 'xlo') r.lo[0] = r.hi[0] - v;
+    else if (b === 'xhi') r.hi[0] = r.lo[0] + v;
+    else if (b === 'ylo') r.lo[1] = r.hi[1] - v;
+    else                  r.hi[1] = r.lo[1] + v;
+    if (drag.on) { drag.on = false; canvas.style.cursor = ''; }
+    persist();
+  }
+  clearEntry();
+  kick();
+  return true;
+}
+
+// arrow keys slide the hovered volume one grid unit along whichever sheet
+// axis lies closest to the arrow on screen — the same calibration as a resize
+let nudgeT = 0, nudgeBox = -1;
+function nudge(key, big) {
+  if (!(tilt.cur > 0.25) || hover.box < 0 || drag.on) return false;
+  const r = rects[hover.box];
+  const c = [(r.lo[0] + r.hi[0]) / 2, (r.lo[1] + r.hi[1]) / 2, (r.base + r.h) * riseK()];
+  const ax = axisOnScreen(c, [1, 0, 0]), ay = axisOnScreen(c, [0, 1, 0]);
+  if (!ax || !ay) return false;
+  const dir = key === 'ArrowLeft' ? [-1, 0] : key === 'ArrowRight' ? [1, 0] : key === 'ArrowUp' ? [0, -1] : [0, 1];
+  const dx = ax.unit[0] * dir[0] + ax.unit[1] * dir[1];
+  const dy = ay.unit[0] * dir[0] + ay.unit[1] * dir[1];
+  const step = (big ? 8 : 1) * GRID;
+  const t = performance.now();
+  if (t - nudgeT > 600 || nudgeBox !== hover.box) checkpoint();   // one undo step per burst
+  nudgeT = t; nudgeBox = hover.box;
+  if (Math.abs(dx) >= Math.abs(dy)) { const s = Math.sign(dx) * step; r.lo[0] += s; r.hi[0] += s; }
+  else                              { const s = Math.sign(dy) * step; r.lo[1] += s; r.hi[1] += s; }
+  persist();
+  kick();
+  return true;
+}
+
+/* ---------- gap dimensions: clearance to the nearest neighbour while moving ---------- */
+
+let gapsShown = false;
+function gapDims() {
+  if (!(drag.on && drag.mode === 'move')) {
+    if (gapsShown) { gaps.innerHTML = ''; gapsShown = false; }
+    return;
+  }
+  const r = rects[drag.box];
+  const z = r.base * riseK();
+  const best = [null, null];
+  for (let j = 0; j < rects.length; j++) {
+    if (j === drag.box) continue;
+    const s = rects[j];
+    const oy0 = Math.max(r.lo[1], s.lo[1]), oy1 = Math.min(r.hi[1], s.hi[1]);
+    if (oy1 > oy0) {   // in line along x: shares depth with the moved plate
+      let g = null, a = 0, b = 0;
+      if (s.lo[0] >= r.hi[0])      { g = s.lo[0] - r.hi[0]; a = r.hi[0]; b = s.lo[0]; }
+      else if (s.hi[0] <= r.lo[0]) { g = r.lo[0] - s.hi[0]; a = r.lo[0]; b = s.hi[0]; }
+      if (g !== null && g <= 512 && (!best[0] || g < best[0].gap)) best[0] = { gap: g, a, b, m: (oy0 + oy1) / 2 };
+    }
+    const ox0 = Math.max(r.lo[0], s.lo[0]), ox1 = Math.min(r.hi[0], s.hi[0]);
+    if (ox1 > ox0) {
+      let g = null, a = 0, b = 0;
+      if (s.lo[1] >= r.hi[1])      { g = s.lo[1] - r.hi[1]; a = r.hi[1]; b = s.lo[1]; }
+      else if (s.hi[1] <= r.lo[1]) { g = r.lo[1] - s.hi[1]; a = r.lo[1]; b = s.hi[1]; }
+      if (g !== null && g <= 512 && (!best[1] || g < best[1].gap)) best[1] = { gap: g, a, b, m: (ox0 + ox1) / 2 };
+    }
+  }
+  let html = '';
+  for (let axis = 0; axis < 2; axis++) {
+    const g = best[axis];
+    if (!g) continue;
+    const P = (u, v) => axis === 0 ? projectWorld(u, v, z) : projectWorld(v, u, z);
+    const s0 = P(g.a, g.m), s1 = P(g.b, g.m);
+    if (!s0 || !s1) continue;
+    const ticks = [[g.a, g.m - 6], [g.a, g.m + 6], [g.b, g.m - 6], [g.b, g.m + 6]].map(([u, v]) => P(u, v));
+    if (ticks.some(t => !t)) continue;
+    const f = n => n.toFixed(1);
+    const major = g.gap % 64 === 0;   // flush, or a whole number of majors apart
+    const mx = (s0[0] + s1[0]) / 2, my = (s0[1] + s1[1]) / 2;
+    html += `<g class="${major ? 'flush' : ''}">`
+      + `<line x1="${f(s0[0])}" y1="${f(s0[1])}" x2="${f(s1[0])}" y2="${f(s1[1])}"/>`
+      + `<line x1="${f(ticks[0][0])}" y1="${f(ticks[0][1])}" x2="${f(ticks[1][0])}" y2="${f(ticks[1][1])}"/>`
+      + `<line x1="${f(ticks[2][0])}" y1="${f(ticks[2][1])}" x2="${f(ticks[3][0])}" y2="${f(ticks[3][1])}"/>`
+      + `<text x="${f(mx)}" y="${f(my - 7)}" text-anchor="middle">${g.gap}</text></g>`;
+  }
+  gaps.innerHTML = html;
+  gapsShown = true;
+}
+
 /* ---------- frame loop (render-on-demand) ---------- */
 
 function resize() {
@@ -611,6 +798,7 @@ function resize() {
   render(true);
 }
 
+let lastSig = NaN;
 function render(force, t = performance.now()) {
   rafId = 0;
   const dt = Math.min(0.05, (t - lastT) / 1000 || 0.016);
@@ -647,7 +835,7 @@ function render(force, t = performance.now()) {
 
   computeBases();
   const rk = riseK();
-  let growing = false;
+  let growing = false, sig = 0;
   for (let i = 0; i < rects.length; i++) {
     const r = rects[i];
     let be = 1;
@@ -655,15 +843,16 @@ function render(force, t = performance.now()) {
       const g = (t - r.born) / 350;
       if (g < 1) { be = g * g * (3 - 2 * g); growing = true; } else r.born = 0;
     }
-    boxLo[i * 2] = r.lo[0]; boxLo[i * 2 + 1] = r.lo[1];
-    boxHi[i * 2] = r.hi[0]; boxHi[i * 2 + 1] = r.hi[1];
-    boxB[i] = r.base * rk;                    // stacked blocks ride their support
-    boxH[i] = r.h * rk * be;                  // volumes rise with the tilt (and on birth)
+    const eb = r.base * rk, eh = r.h * rk * be;   // stacked blocks ride their support; volumes rise with the tilt
+    boxData[i * 4] = r.lo[0]; boxData[i * 4 + 1] = r.lo[1]; boxData[i * 4 + 2] = r.hi[0]; boxData[i * 4 + 3] = r.hi[1];
+    boxData[(MAXB + i) * 4] = eb; boxData[(MAXB + i) * 4 + 1] = eh;
+    sig += (i + 1) * (r.lo[0] * 1.1 + r.lo[1] * 2.3 + r.hi[0] * 3.7 + r.hi[1] * 5.1 + eb * 7.3 + eh * 9.7);
   }
-  gl.uniform2fv(U.uBoxLo, boxLo);
-  gl.uniform2fv(U.uBoxHi, boxHi);
-  gl.uniform1fv(U.uBoxH, boxH);
-  gl.uniform1fv(U.uBoxB, boxB);
+  sig += rects.length * 1e6;
+  if (sig !== lastSig) {   // the model changed: re-upload it
+    lastSig = sig;
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, MAXB, 2, gl.RGBA, gl.FLOAT, boxData);
+  }
   gl.uniform1i(U.uNBox, rects.length);
   gl.uniform1i(U.uHoverBox, tilt.cur > 0.25 ? hover.box : -1);
   gl.uniform1i(U.uHoverFace, hover.face);
@@ -673,32 +862,45 @@ function render(force, t = performance.now()) {
   // DOM readout rides the crosshair (world → screen, any tilt)
   const m = meas.on;
   const rs = projectWorld(cur.x, cur.y, 0);
-  readout.textContent = m
-    ? `w: ${Math.abs(Math.round(target.x - meas.ax))} · h: ${Math.abs(Math.round(target.y - meas.ay))}`
-    : `x: ${Math.round(target.x)} · y: ${Math.round(target.y)}`;
+  if (m) {
+    const wv = Math.abs(Math.round(target.x - meas.ax)), hv = Math.abs(Math.round(target.y - meas.ay));
+    if (entryActive()) readout.innerHTML = `w: ${(entry.buf[0] || entry.field === 0) ? typed(0) : wv} · h: ${(entry.buf[1] || entry.field === 1) ? typed(1) : hv}`;
+    else readout.textContent = `w: ${wv} · h: ${hv}`;
+  } else readout.textContent = `x: ${Math.round(target.x)} · y: ${Math.round(target.y)}`;
   if (rs) readout.style.transform = `translate(${Math.round(rs[0]) + 14}px, ${Math.round(rs[1]) + 16}px)`;
   readout.style.opacity = m ? '1'
     : (tilt.cur < 0.2 && energy > 0.03) ? String(Math.min(1, energy * 1.6)) : '0';
 
-  // dimension labels on the hovered volume
+  // dimension labels on the hovered volume (the one being typed into is underlined)
   const hb = (tilt.cur > 0.25 && hover.box >= 0) ? rects[hover.box] : null;
   if (hb) {
     const eh = hb.h * riseK(), eb = hb.base * riseK();
     const cxm = (hb.lo[0] + hb.hi[0]) / 2, cym = (hb.lo[1] + hb.hi[1]) / 2;
-    place(dw, `w: ${Math.round(hb.hi[0] - hb.lo[0])}`, projectWorld(cxm, hb.lo[1], eb), -18, 14);
-    place(dh, `h: ${Math.round(hb.hi[1] - hb.lo[1])}`, projectWorld(hb.hi[0], cym, eb), 12, 0);
-    place(dz, `z: ${Math.round(hb.h)}`, projectWorld(hb.lo[0], hb.lo[1], eb + eh / 2), -56, -6);
+    const em = entryMode();
+    const tb = (entryActive() && (em === 'resize' || em === 'hover')) ? (em === 'resize' ? drag.bound : hover.bound) : '';
+    const lab = (b, key, v) => tb && (tb === 'z' ? b === 'z' : tb[0] === b) ? [`${key}: ${typed(0)}`, true] : [`${key}: ${v}`, false];
+    const [tw, hw] = lab('x', 'w', Math.round(hb.hi[0] - hb.lo[0]));
+    const [th, hh] = lab('y', 'h', Math.round(hb.hi[1] - hb.lo[1]));
+    const [tz, hz] = lab('z', 'z', Math.round(hb.h));
+    place(dw, tw, projectWorld(cxm, hb.lo[1], eb), -18, 14, hw);
+    place(dh, th, projectWorld(hb.hi[0], cym, eb), 12, 0, hh);
+    // a move is about clearance, not height: the gap dimensions take the corner
+    place(dz, tz, (drag.on && drag.mode === 'move') ? null : projectWorld(hb.lo[0], hb.lo[1], eb + eh / 2), -56, -6, hz);
   } else {
     dw.style.opacity = dh.style.opacity = dz.style.opacity = '0';
   }
+  gapDims();
 
-  // the hint follows the mode
+  // the hint follows the mode (the demo narrates through the same line)
   const tilted = tilt.cur > 0.25;
-  if (tilted !== hintTilted) {
+  if (hintOverride !== null) {
+    if (hint.innerHTML !== hintOverride) hint.innerHTML = hintOverride;
+    hintTilted = null;
+  } else if (tilted !== hintTilted) {
     hintTilted = tilted;
     hint.innerHTML = tilted
-      ? '<em>click&ndash;click</em> drafts &nbsp;&middot;&nbsp; <em>faces</em> move &nbsp;&middot;&nbsp; <em>lines</em> resize &nbsp;&middot;&nbsp; <em>swipe</em> orbits &nbsp;&middot;&nbsp; <em>pinch</em> zooms &nbsp;&middot;&nbsp; <em>backspace</em> deletes &nbsp;&middot;&nbsp; <em>esc</em> flattens'
-      : '<em>click&ndash;click</em> to draft &nbsp;&middot;&nbsp; <em>scroll</em> to tilt &nbsp;&middot;&nbsp; <em>pinch</em> to zoom &nbsp;&middot;&nbsp; <em>&#8984;z</em> undoes &nbsp;&middot;&nbsp; <em>url</em> is a share link';
+      ? '<em>click&ndash;click</em> drafts &nbsp;&middot;&nbsp; <em>faces</em> move &nbsp;&middot;&nbsp; <em>lines</em> resize &nbsp;&middot;&nbsp; <em>type</em> a size &nbsp;&middot;&nbsp; <em>arrows</em> nudge &nbsp;&middot;&nbsp; <em>swipe</em> orbits &nbsp;&middot;&nbsp; <em>backspace</em> deletes &nbsp;&middot;&nbsp; <em>esc</em> flattens'
+      : '<em>click&ndash;click</em> to draft &nbsp;&middot;&nbsp; <em>type</em> w &times; h &nbsp;&middot;&nbsp; <em>scroll</em> to tilt &nbsp;&middot;&nbsp; <em>pinch</em> to zoom &nbsp;&middot;&nbsp; <em>&#8984;z</em> undoes &nbsp;&middot;&nbsp; <em>url</em> is a share link';
   }
 
   const settled = Math.abs(cur.x - target.x) < 0.05 && Math.abs(cur.y - target.y) < 0.05;
@@ -731,6 +933,7 @@ addEventListener('pointermove', e => {
   }
   if (tilt.cur > 0.25) {
     const pk = pick(e.clientX, e.clientY);
+    if (pk.box !== hover.box || pk.bound !== hover.bound) clearEntry();
     hover.box = pk.box; hover.mode = pk.mode; hover.bound = pk.bound;
     hover.face = pk.mode === 'move' ? pk.face : 0;   // fill the face only for the hand
     canvas.style.cursor = pk.box < 0 ? ''
@@ -746,6 +949,7 @@ addEventListener('pointermove', e => {
 
 addEventListener('pointerdown', e => {
   if (e.target.closest && e.target.closest('a, button, select, input')) return;
+  clearEntry();
   if (tilt.cur > 0.25) {                      // tilted: draft on the ground, sculpt on boxes
     const w = pointerToWorld(e.clientX, e.clientY);
     if (meas.on) {
@@ -782,6 +986,7 @@ addEventListener('pointerdown', e => {
 addEventListener('pointerup', () => {
   if (drag.on) {
     drag.on = false;
+    clearEntry();
     canvas.style.cursor = hover.box >= 0 ? 'grab' : '';
     persist();
     kick();
@@ -802,12 +1007,37 @@ addEventListener('wheel', e => {
 }, { passive: false });
 
 addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
-    e.preventDefault();
-    undo();
+  if (e.metaKey || e.ctrlKey) {
+    if (e.key === 'z' || e.key === 'Z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
     return;
   }
-  if ((e.key === 'Backspace' || e.key === 'Delete') && tilt.cur > 0.25 && hover.box >= 0) {
+  const mode = entryMode();
+  if (mode) {
+    if (/^[0-9]$/.test(e.key)) {
+      if (entry.buf[entry.field].length < 4) entry.buf[entry.field] += e.key;
+      kick();
+      return;
+    }
+    if (mode === 'draft' && (e.key === 'x' || e.key === 'X' || e.key === ',' || e.key === ' ' || e.key === 'Tab')) {
+      e.preventDefault();
+      entry.field = 1;
+      kick();
+      return;
+    }
+    if (e.key === 'Enter') { e.preventDefault(); applyEntry(); return; }
+    if (e.key === 'Backspace' && entryActive()) {
+      if (entry.field === 1 && entry.buf[1] === '') entry.field = 0;
+      entry.buf[entry.field] = entry.buf[entry.field].slice(0, -1);
+      kick();
+      return;
+    }
+    if (e.key === 'Escape' && entryActive()) { clearEntry(); kick(); return; }
+  }
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    if (nudge(e.key, e.shiftKey)) e.preventDefault();
+    return;
+  }
+  if ((e.key === 'Backspace' || e.key === 'Delete') && tilt.cur > 0.25 && hover.box >= 0 && !drag.on) {
     checkpoint();
     rects.splice(hover.box, 1);
     hover.box = -1; hover.face = 0; drag.on = false;
@@ -823,11 +1053,6 @@ addEventListener('keydown', e => {
   kick();
 });
 
-// verification hooks (harmless in normal use)
-window.__project = projectWorld;
-window.__tstate = () => ({ tilt: tilt.cur, zoom: zoom.cur, orbit: orbit.cur, hover: { ...hover },
-  rects: rects.map(r => ({ lo: r.lo.slice(), hi: r.hi.slice(), h: r.h, base: r.base || 0 })) });
-
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) { if (rafId) cancelAnimationFrame(rafId); rafId = 0; running = false; }
   else render(true);
@@ -835,9 +1060,10 @@ document.addEventListener('visibilitychange', () => {
 addEventListener('resize', resize);
 
 // restore a shared link, else last session's drawing
-(() => {
+const fromLink = (() => {
   const dm = location.hash.match(/d=([^&]*)/);
   let list = dm && deserialize(decodeURIComponent(dm[1]));
+  const linked = !!(list && list.length);
   if (!list) { try { list = deserialize(localStorage.getItem(STORE_KEY)); } catch (e) { /* ignore */ } }
   if (list && list.length) for (const r of list) rects.push(r);
   const vm = location.hash.match(/v=([^&]+)/);
@@ -847,10 +1073,45 @@ addEventListener('resize', resize);
     if (Number.isFinite(o)) orbit.tgt = o;
     if (Number.isFinite(z)) zoom.tgt = Math.max(0.45, Math.min(2.4, z));
   }
+  return linked;
 })();
 
 resize();
 kick();   // a restored view (tilt/orbit/zoom targets) animates in on its own
+
+// the table's public face: the in-page demo (drive.js) and the
+// verification harness drive it through here
+window.__table = {
+  canvas,
+  fromLink,
+  empty: () => rects.length === 0,
+  size: () => [W, H],
+  project: projectWorld,
+  ground: pointerToWorld,
+  state: () => ({
+    tilt: tilt.cur, tiltTgt: tilt.tgt, zoom: zoom.cur, orbit: orbit.cur, orbitTgt: orbit.tgt, meas: meas.on,
+    hover: { ...hover },
+    drag: { on: drag.on, box: drag.box, mode: drag.mode, bound: drag.bound, unit: drag.unit.slice(), perUnit: drag.perUnit, sx: drag.sx, sy: drag.sy },
+    entry: { buf: entry.buf.slice(), field: entry.field },
+    rects: rects.map(r => ({ lo: r.lo.slice(), hi: r.hi.slice(), h: r.h, base: r.base || 0 })),
+    undo: hist.length, redo: redoStack.length,
+  }),
+  snapshot: () => ({ d: serialize(), v: [tilt.tgt, orbit.tgt, zoom.tgt], hist: hist.slice(), redo: redoStack.slice() }),
+  restore: s => {
+    hist.length = 0; hist.push(...s.hist);
+    redoStack.length = 0; redoStack.push(...s.redo);
+    tilt.tgt = s.v[0]; orbit.tgt = s.v[1]; zoom.tgt = s.v[2];
+    restoreList(s.d);
+  },
+  clear: () => { rects.length = 0; hover.box = -1; hover.face = 0; hover.mode = ''; drag.on = false; meas.on = false; canvas.style.cursor = ''; kick(); },
+  resetView: () => { tilt.tgt = 0; orbit.tgt = 0; zoom.tgt = 1; kick(); },
+  quiet: v => { quiet = !!v; },
+  hint: t => { hintOverride = t; kick(); },
+  kick,
+};
+window.__project = projectWorld;
+window.__tstate = () => window.__table.state();
 </script>
+<script type="module" src="./drive.js"></script>
 </body>
 </html>

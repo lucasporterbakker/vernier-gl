@@ -1,0 +1,12 @@
+{
+  "name": "vernier-record",
+  "private": true,
+  "type": "module",
+  "description": "Records the drafting table's in-page demo to video over the DevTools protocol.",
+  "scripts": {
+    "record": "node record.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

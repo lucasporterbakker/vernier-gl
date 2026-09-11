@@ -91,6 +91,14 @@ void main() {
   float mFill = glass * (0.055 + 0.045 * uHold);
   float mAnchor = handle(p, uMeas.xy, r) * uMeasA;
 
+  // rulers: the pane's edges are scales — a tick every minor, a longer one
+  // every major, drawn inward from the border like the jaw of a caliper
+  vec2 tLen = mix(vec2(3.0), vec2(6.0), step(dMaj, vec2(0.5 * uDpr))) * uDpr;
+  float nearX = step(lo.y, p.y) * step(p.y, lo.y + tLen.x) + step(hi.y - tLen.x, p.y) * step(p.y, hi.y);
+  float nearY = step(lo.x, p.x) * step(p.x, lo.x + tLen.y) + step(hi.x - tLen.y, p.x) * step(p.x, hi.x);
+  float mRuler = max(hairline(dMin.x, hw) * min(nearX, 1.0) * inX,
+                     hairline(dMin.y, hw) * min(nearY, 1.0) * inY) * uMeasA;
+
   // completed hold: all four corners take handles for a beat
   float mCorners = min(handle(p, lo, r) + handle(p, hi, r)
                      + handle(p, vec2(lo.x, hi.y), r) + handle(p, vec2(hi.x, lo.y), r), 1.0)
@@ -113,6 +121,7 @@ void main() {
   col += uAc * glow * (0.05 + 0.04 * uHold);
   col += uAc * mSweep * 0.10;
   col += uAc * mBorder * (0.55 + band * 0.22 + 0.25 * min(uHold, 1.0));
+  col += uAc * mRuler * (0.45 + 0.25 * min(uHold, 1.0));
   col += uAc * mAnchor * 0.9;
   col += uAc * mCorners * 0.9;
   col += uAc * ring * uEnergy * uPulse;

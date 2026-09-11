@@ -5,9 +5,9 @@
 An infinite 8px grid that reveals itself around your pointer. A crosshair
 that glides between grid intersections like the jaw of a measuring
 instrument. Click once to pin an anchor, move to stretch a live dimension
-pane (`w × h`) that reads like lit glass over the grid, click again to
-release — the final area holds for a beat, corners take handles, then a
-scan-line sweeps it away. Named after the [vernier
+pane (`w × h`) that reads like lit glass over the grid, its edges ticked
+like a rule, click again to release — the final area holds for a beat,
+corners take handles, then a scan-line sweeps it away. Named after the [vernier
 scale](https://en.wikipedia.org/wiki/Vernier_scale) — the sliding secondary
 scale that made calipers precise.
 
@@ -33,28 +33,44 @@ and it stacks; drag the support away and what sat on it drops.
 | gesture | what it does |
 |---------|--------------|
 | click–click | draft a plate (flat or tilted) |
+| type a number | set the dimension you're drafting or holding — `240`, `x`, `160`, enter |
 | scroll | tilt the sheet between plan and perspective |
 | sideways scroll | orbit the model |
 | pinch | zoom |
 | drag a face | move the volume across the sheet |
 | drag an edge | resize the footprint, or pull the height |
+| arrows | nudge the hovered volume a grid unit (⇧ for a major) |
 | backspace | delete what you're hovering |
-| ⌘Z | undo |
+| ⌘Z / ⇧⌘Z | undo / redo |
 | esc | cancel a measurement, then flatten, then reset zoom |
 
+Every dimension is live and every edge is a rule: the pane you draft is
+ticked every grid unit, longer every major, and while you move a volume a
+dimension line reads the clearance to its nearest neighbour, brightening
+when the gap is flush or a whole number of majors.
+
 Whatever you draw is encoded in the URL, so the address bar is a share
-link, and it is kept in `localStorage` between visits.
+link, and it is kept in `localStorage` between visits. Left alone on an
+empty sheet, the table drafts a demo of its own after a few seconds (the
+▶ in the corner replays it, and gives your drawing back afterwards) — the
+same choreography `tools/record` captures to video.
 
 A fixed sun gives the volumes lambert tone and casts soft shadows with a
-penumbra that widens as it travels — computed analytically in the fragment
-shader rather than with shadow maps, which blur the hairlines.
+penumbra that widens as it travels, plus contact occlusion where a plate
+rests on the sheet or on another plate — computed analytically in the
+fragment shader rather than with shadow maps, which blur the hairlines.
 
 It ships in two editions. `index.html` (the live demo above) is built on a
 three.js scene graph: `BoxGeometry` volumes wearing graph-paper
 `ShaderMaterial`s, a `PerspectiveCamera` whose fov morphs from 2° to 31°
 while the dolly compensates so the plan never pops, and `Raycaster`
-picking. `/demo/table.html` is the same table with zero dependencies —
-one fragment shader raytracing the volumes itself.
+picking. Its light is analytic but not per-frame: the sun is fixed, so
+the ground's shadows are baked into a sheet-space texture whenever the
+model changes, and each volume tests only the neighbours that can
+actually shade it — orbiting costs nothing extra at sixty-four volumes.
+`/demo/table.html` is the same table with zero dependencies — one
+fragment shader raytracing the volumes and their shadows itself, every
+pixel, every frame it draws.
 
 ## Quick start
 
