@@ -1014,10 +1014,22 @@ function render(force, t = performance.now()) {
     const [tw, hw] = lab('x', 'w', Math.round(hb.hi[0] - hb.lo[0]));
     const [th, hh] = lab('y', 'h', Math.round(hb.hi[1] - hb.lo[1]));
     const [tz, hz] = lab('z', 'z', Math.round(hb.h));
-    place(dw, tw, projectWorld(cxm, hb.lo[1], eb), -18, 14, hw);
-    place(dh, th, projectWorld(hb.hi[0], cym, eb), 12, 0, hh);
+    // each label anchors to the edge or corner nearest the camera, so it sits
+    // on the volume's near side rather than behind a neighbour
+    const eye = camState.eye;
+    const d2 = p => (p[0] - eye[0]) ** 2 + (p[1] - eye[1]) ** 2 + (p[2] - eye[2]) ** 2;
+    const near = (a, b) => d2(a) <= d2(b) ? a : b;
+    const ey = near([cxm, hb.lo[1], eb], [cxm, hb.hi[1], eb]);
+    const ex = near([hb.lo[0], cym, eb], [hb.hi[0], cym, eb]);
+    const corner = [[hb.lo[0], hb.lo[1]], [hb.hi[0], hb.lo[1]], [hb.lo[0], hb.hi[1]], [hb.hi[0], hb.hi[1]]]
+      .map(c => [c[0], c[1], eb + eh / 2]).reduce(near);
+    const sc = projectWorld(cxm, cym, eb + eh / 2);
+    const sx = projectWorld(ex[0], ex[1], ex[2]), sz = projectWorld(corner[0], corner[1], corner[2]);
+    const leftOf = s => s && sc && s[0] < sc[0];
+    place(dw, tw, projectWorld(ey[0], ey[1], ey[2]), -18, 14, hw);
+    place(dh, th, sx, leftOf(sx) ? -58 : 12, 0, hh);
     // a move is about clearance, not height: the gap dimensions take the corner
-    place(dz, tz, (drag.on && drag.mode === 'move') ? null : projectWorld(hb.lo[0], hb.lo[1], eb + eh / 2), -56, -6, hz);
+    place(dz, tz, (drag.on && drag.mode === 'move') ? null : sz, leftOf(sz) ? -56 : 12, -6, hz);
   } else {
     dw.style.opacity = dh.style.opacity = dz.style.opacity = '0';
   }
