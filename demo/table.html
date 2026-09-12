@@ -42,12 +42,13 @@
   #gaps .flush line { stroke: var(--fg); opacity: 1; }
   #gaps .flush text { fill: var(--fg); }
   #tools { position: fixed; right: 22px; bottom: 12px; z-index: 3; display: flex; gap: 18px; }
-  #tools button {
+  #clear { position: fixed; right: 22px; top: 16px; z-index: 3; }
+  #tools button, #clear {
     background: none; border: 0; padding: 4px 0; margin: 0;
     color: var(--fg1); font: inherit; font-size: 11px; letter-spacing: 0.02em;
     cursor: pointer; opacity: 0.85;
   }
-  #tools button:hover { color: var(--fg); opacity: 1; }
+  #tools button:hover, #clear:hover { color: var(--fg); opacity: 1; }
   #tools button[hidden] { display: none; }
 </style>
 </head>
@@ -60,7 +61,8 @@
 <div class="dim" id="dh" aria-hidden="true"></div>
 <div class="dim" id="dz" aria-hidden="true"></div>
 <svg id="gaps" aria-hidden="true"></svg>
-<div id="tools"><button id="clear" type="button" aria-label="clear the sheet">&#10005; clear</button><button id="play" type="button" aria-label="watch a demo">&#9654; watch</button></div>
+<button id="clear" type="button" aria-label="clear the sheet">&#10005; clear</button>
+<div id="tools"><button id="play" type="button" aria-label="watch a demo">&#9654; watch</button></div>
 
 <script type="module">
 /* vernier — drafting table, the zero-dependency edition.

@@ -87,66 +87,70 @@
      [x0, y0, x1, y1, height] in px from the letter's bottom-left corner. Drafting
      order is build order, so each block goes plinth, lots, tiers. */
 
-  const X0 = -480, Y0 = -112;   // the five blocks span 960 × 216, avenues of 48 between
+  // Everything sits on the major grid: blocks are 3 × 4 majors (the W is 4 × 4),
+  // avenues are one major wide, and the block edges land on major lines. Inside a
+  // block the letter is drawn in 64px stroke zones with an 8px sidewalk at every
+  // edge, so strokes that meet leave a 16px lane between their buildings.
+  const X0 = -640, Y0 = -128;   // the five blocks span 1280 × 256, centred on the sheet
   const LETTERS = {
-    W: { at: 0, w: 192, lots: [
-      [0, 0, 48, 72, 96], [0, 72, 48, 144, 224], [0, 144, 48, 216, 64],          // left stem
-      [144, 0, 192, 48, 56], [144, 48, 192, 144, 264], [144, 144, 192, 216, 120], // right stem
-      [48, 0, 96, 48, 40], [96, 0, 144, 48, 72],                                  // bottom bar
-      [72, 48, 120, 96, 160], [72, 96, 120, 144, 48],                             // middle stroke
-      [8, 80, 40, 136, 48], [16, 88, 32, 128, 32],                                // setbacks
-      [152, 56, 184, 136, 56], [160, 64, 176, 128, 40],
-      [16, 168, 32, 184, 16], [112, 16, 128, 32, 16],                             // rooftop plant
+    W: { at: 0, w: 256, lots: [
+      [8, 8, 56, 96, 104], [8, 96, 56, 176, 232], [8, 176, 56, 248, 72],          // left stem
+      [200, 8, 248, 72, 64], [200, 72, 248, 168, 272], [200, 168, 248, 248, 128],  // right stem
+      [72, 8, 128, 56, 40], [128, 8, 184, 56, 80],                                 // bottom bar
+      [104, 72, 152, 128, 168], [104, 128, 152, 184, 56],                          // middle stroke
+      [16, 104, 48, 168, 56], [24, 112, 40, 160, 40],                              // setbacks
+      [208, 80, 240, 160, 64], [216, 88, 232, 152, 48],
+      [24, 200, 40, 216, 16], [144, 24, 160, 40, 16],                              // rooftop plant
     ] },
-    E: { at: 240, w: 144, lots: [
-      [0, 0, 48, 72, 80], [0, 72, 48, 152, 208], [0, 152, 48, 216, 128],
-      [48, 168, 96, 216, 48], [96, 168, 144, 216, 104],
-      [48, 88, 88, 128, 64], [88, 88, 120, 128, 40],
-      [48, 0, 96, 48, 56], [96, 0, 144, 48, 136],
-      [8, 80, 40, 144, 48], [16, 88, 32, 136, 32],
-      [104, 8, 136, 40, 40],
-      [112, 184, 128, 200, 16],
+    E: { at: 320, w: 192, lots: [
+      [8, 8, 56, 104, 96], [8, 104, 56, 184, 224], [8, 184, 56, 248, 128],
+      [72, 200, 128, 248, 64], [128, 200, 184, 248, 112],
+      [72, 104, 112, 152, 56], [112, 104, 152, 152, 40],
+      [72, 8, 128, 56, 48], [128, 8, 184, 56, 144],
+      [16, 112, 48, 176, 56], [24, 120, 40, 168, 40],
+      [136, 16, 176, 48, 40],
+      [144, 216, 160, 232, 16], [24, 48, 40, 64, 16],
     ] },
-    B: { at: 432, w: 144, lots: [
-      [0, 0, 48, 56, 112], [0, 56, 48, 120, 296], [0, 120, 48, 216, 152],
-      [48, 168, 96, 216, 72], [96, 168, 144, 216, 112],
-      [104, 128, 144, 168, 88],
-      [48, 88, 96, 128, 48], [96, 88, 144, 128, 64],
-      [104, 48, 144, 88, 120],
-      [48, 0, 96, 48, 40], [96, 0, 144, 48, 80],
-      [8, 64, 40, 112, 64], [16, 72, 32, 104, 48],
-      [112, 56, 136, 80, 40],
-      [16, 160, 32, 176, 16], [112, 16, 128, 32, 16],
+    B: { at: 576, w: 192, lots: [
+      [8, 8, 56, 80, 112], [8, 80, 56, 160, 296], [8, 160, 56, 248, 160],
+      [72, 200, 120, 248, 72], [120, 200, 184, 248, 120],
+      [136, 160, 184, 192, 96],
+      [72, 104, 120, 152, 48], [120, 104, 184, 152, 80],
+      [136, 64, 184, 96, 128],
+      [72, 8, 120, 56, 40], [120, 8, 184, 56, 88],
+      [16, 88, 48, 152, 64], [24, 96, 40, 144, 48],
+      [144, 72, 176, 88, 40],
+      [24, 200, 40, 216, 16], [144, 24, 160, 40, 16],
     ] },
-    G: { at: 624, w: 144, lots: [
-      [0, 168, 48, 216, 120], [48, 168, 104, 216, 56], [104, 168, 144, 216, 168],
-      [0, 0, 48, 72, 120], [0, 72, 48, 168, 232],
-      [48, 0, 96, 48, 64], [96, 0, 144, 48, 96],
-      [104, 48, 144, 96, 136],
-      [72, 96, 144, 128, 40],
-      [8, 80, 40, 160, 56], [16, 88, 32, 152, 40],
-      [112, 176, 136, 208, 48],
-      [112, 64, 128, 80, 16],
+    G: { at: 832, w: 192, lots: [
+      [8, 200, 64, 248, 120], [64, 200, 120, 248, 56], [120, 200, 184, 248, 176],
+      [8, 8, 56, 96, 128], [8, 96, 56, 184, 240],
+      [72, 8, 128, 56, 64], [128, 8, 184, 56, 104],
+      [136, 72, 184, 120, 144],
+      [104, 128, 184, 152, 40],
+      [16, 104, 48, 176, 56], [24, 112, 40, 168, 40],
+      [128, 208, 176, 240, 48],
+      [152, 88, 168, 104, 16],
     ] },
-    L: { at: 816, w: 144, lots: [] },   // its plinth is laid with the plan; the buildings are drafted live
+    L: { at: 1088, w: 192, lots: [] },   // its plinth is laid with the plan; the buildings are drafted live
   };
   const LX = X0 + LETTERS.L.at;
-  const L_STEM = [LX, Y0, LX + 48, Y0 + 216];
-  const L_FOOT_ANCHOR = [LX + 48, Y0], L_FOOT_SIZE = ['96', '48'];
-  const L_CROWN = [LX, Y0 + 72, LX + 48, Y0 + 120];
-  const DROP_LO = [X0 + LETTERS.G.at, Y0 + 16];   // where the L's crown gets dropped: the G stem's lowest lot
+  const L_STEM = [LX + 8, Y0 + 8, LX + 56, Y0 + 248];
+  const L_FOOT_ANCHOR = [LX + 72, Y0 + 8], L_FOOT_SIZE = ['112', '48'];
+  const L_CROWN = [LX + 8, Y0 + 96, LX + 56, Y0 + 144];
+  const DROP_LO = [X0 + LETTERS.G.at + 8, Y0 + 24];   // where the L's crown gets dropped: the G stem's lowest lot
   const N_PLAN = Object.values(LETTERS).reduce((n, l) => n + 1 + l.lots.length, 0);
   const IDX = { lStem: N_PLAN, lFoot: N_PLAN + 1, lCrown: N_PLAN + 2 };
 
-  const snap8 = v => Math.round(v / 8) * 8;
-  const centre = () => { const [W, H] = tbl.size(); return [snap8(W / 2), snap8(H / 2)]; };
+  const snap64 = v => Math.round(v / 64) * 64;
+  const centre = () => { const [W, H] = tbl.size(); return [snap64(W / 2), snap64(H / 2)]; };
   const ground = (x, y) => { const c = centre(); return tbl.project(c[0] + x, c[1] + y, 0); };
 
   function cityPlates() {
     const c = centre(), out = [];
     for (const k of 'WEBGL') {
       const L = LETTERS[k], ox = c[0] + X0 + L.at, oy = c[1] + Y0;
-      out.push({ lo: [ox - 8, oy - 8], hi: [ox + L.w + 8, oy + 224], h: 8 });   // the plinth
+      out.push({ lo: [ox, oy], hi: [ox + L.w, oy + 256], h: 8 });   // the plinth: the block itself, on the majors
       for (const [x0, y0, x1, y1, h] of L.lots)
         out.push({ lo: [ox + x0, oy + y0], hi: [ox + x1, oy + y1], h });
     }
@@ -235,7 +239,9 @@
     const [W, H] = tbl.size();
     say('a plan, drafted flat: five city blocks that spell a word');
     moveTo(W * 0.12, H * 0.86);
-    await sleep(400);
+    await sleep(300);
+    for (let i = 0; i < 2; i++) { wheel(0, 6.8, true); await sleep(70); }   // pinch out a touch: the blocks fill the sheet
+    await sleep(500);
     const plan = cityPlates();
     for (let i = 0; i < plan.length; i++) { tbl.add(plan[i], i === 0); await sleep(30); }
     await sleep(700);
@@ -260,13 +266,13 @@
     // pinch out, drop the camera to street height, and walk around the block
     say('pinching out, tilting low, and walking around the block');
     await glide([W * 0.9, H * 0.88], 14); await sleep(300);
-    for (let i = 0; i < 4; i++) { wheel(0, 5, true); await sleep(60); }
+    for (let i = 0; i < 3; i++) { wheel(0, 6.2, true); await sleep(70); }
     await sleep(500);
     for (let i = 0; i < 60 && tbl.state().tiltTgt < 0.86; i++) { wheel(0, 42); await sleep(42); }
     await sleep(1400);
     const tv = tbl.state().tilt, ease = tv * tv * (3 - 2 * tv), want = 2 * Math.PI / ease;
-    for (let i = 0; i < 240 && tbl.state().orbitTgt < want; i++) { wheel(30, 0); await sleep(46); }
-    await sleep(2600);
+    for (let i = 0; i < 400 && tbl.state().orbitTgt < want; i++) { wheel(13, 0); await sleep(46); }   // a slow walk
+    await sleep(2800);
   }
 
   /* ---------- play / stop ---------- */

@@ -39,9 +39,14 @@ const getJson = p => new Promise((res, rej) => {
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 const profile = join(tmpdir(), `vernier-record-${process.pid}`);
+// a real device scale factor, not an emulated one: the screencast only hands
+// out retina frames when the window itself is hi-dpi (emulation captures at
+// css pixels). Headless keeps a toolbar's worth of the window, so the bounds
+// are corrected after launch until the viewport is exactly W × H.
 const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
-  '--no-first-run', '--hide-scrollbars', 'about:blank',
+  '--no-first-run', '--hide-scrollbars', `--window-size=${W},${H + 90}`, `--force-device-scale-factor=${scale}`,
+  'about:blank',
 ], { stdio: 'ignore' });
 const wipe = () => { try { rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch (e) { /* Chrome still closing; the OS reaps its temp dir */ } };
 const cleanup = async () => {
@@ -81,7 +86,15 @@ try {
 
   await send('Page.enable');
   await send('Runtime.enable');
-  await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: scale, mobile: false });
+  const { windowId } = await send('Browser.getWindowForTarget');
+  for (let i = 0; i < 4; i++) {
+    const [iw, ih] = await ev('[innerWidth, innerHeight]');
+    if (iw === W && ih === H) break;
+    const { bounds } = await send('Browser.getWindowBounds', { windowId });
+    await send('Browser.setWindowBounds', { windowId, bounds: { width: bounds.width + (W - iw), height: bounds.height + (H - ih) } });
+    await sleep(300);
+  }
+  console.log('viewport', await ev('innerWidth + "×" + innerHeight + " @" + devicePixelRatio + "x"'));
 
   // a clean sheet: clear the last drawing, reload, wait for the table
   await send('Page.navigate', { url });
@@ -116,7 +129,7 @@ try {
 
   const mp4 = join(out, 'vernier-gl.mp4');
   const ff = spawn('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', join(out, 'list.txt'),
-    '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p', '-r', '30', '-c:v', 'libx264', '-crf', '20', '-movflags', '+faststart', mp4],
+    '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p', '-r', '30', '-c:v', 'libx264', '-preset', 'slow', '-crf', '23', '-movflags', '+faststart', mp4],
     { stdio: 'inherit' });
   const code = await new Promise(r => ff.on('exit', r).on('error', () => r(-1)));
   if (code === 0) console.log(`wrote ${mp4}`);
