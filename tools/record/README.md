@@ -15,7 +15,7 @@ Output: `out/vernier-gl.mp4` at `--size` × `--scale` (2560 × 1600 by
 default) plus the raw JPEG frames and an ffmpeg concat list carrying each
 frame's real timestamp, so pauses in the choreography survive the encode.
 Chrome is found at its macOS path by default; point `CHROME=` elsewhere if
-needed. A smaller upload for a forum:
+needed. A smaller file, for anywhere with an upload limit:
 
 ```sh
 ffmpeg -i out/vernier-gl.mp4 -vf scale=1920:-2 -c:v libx264 -preset slow -crf 26 -movflags +faststart out/vernier-gl-1080.mp4
